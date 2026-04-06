@@ -296,12 +296,17 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             double eminClamped = Math.Max(1e-9, Math.Min(emin, 0.5));
 
-            var mgLevels = MgGrid.BuildHierarchy(
-                inside, support, load, nx, ny, nz, S, dxFine, dyFine, dzFine, nu, maxLevels: 4);
-            res.MgLevelCount = mgLevels.Count;
-
             IntPtr gpuCtx = IntPtr.Zero;
             bool useGpu = useGpuMatVec && MetalSharedContext.TryGetContext(out gpuCtx);
+
+            List<MgLevel> mgLevels;
+            if (useGpu)
+                mgLevels = MgGrid.BuildHierarchy(
+                    inside, support, load, nx, ny, nz, S, dxFine, dyFine, dzFine, nu, maxLevels: 4);
+            else
+                mgLevels = new List<MgLevel>();
+            res.MgLevelCount = mgLevels.Count;
+
             bool canUseMgpcg = useGpu && mgLevels.Count >= 2;
             double[][]? mgRhoArrays = null;
             if (canUseMgpcg)
@@ -371,47 +376,60 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 MatVec(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, vecIn, vecOut);
             };
 
-            for (int outer = 0; outer < maxOuterIter; outer++)
+            float[][]? mgRhoFloatsPinned = null;
+            GCHandle[]? mgRhoGCHandles = null;
+            IntPtr[]? mgRhoPtrsPinned = null;
+            if (canUseMgpcg && mgRhoArrays != null)
             {
-                BuildDiagonal(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag);
-
-                if (canUseMgpcg && mgRhoArrays != null)
+                int Lmg = mgLevels.Count;
+                mgRhoFloatsPinned = new float[Lmg][];
+                mgRhoGCHandles = new GCHandle[Lmg];
+                mgRhoPtrsPinned = new IntPtr[Lmg];
+                for (int l = 0; l < Lmg; l++)
                 {
-                    for (int e = 0; e < nElem; e++)
-                        mgRhoArrays[0][e] = StiffnessInterp(x[e], passive[e], eminClamped, simpP);
-                    for (int l = 1; l < mgLevels.Count; l++)
-                        MgGrid.PropagateRho(mgLevels[l - 1], mgLevels[l], mgRhoArrays[l - 1], mgRhoArrays[l]);
-                    for (int l = 0; l < mgLevels.Count; l++)
-                        MgGrid.RebuildDiag(mgLevels[l], mgRhoArrays[l],
-                            l == 0 ? passive : mgLevels[l].Passive, eminClamped, simpP);
+                    mgRhoFloatsPinned[l] = new float[mgLevels[l].NElem];
+                    mgRhoGCHandles[l] = GCHandle.Alloc(mgRhoFloatsPinned[l], GCHandleType.Pinned);
+                    mgRhoPtrsPinned[l] = mgRhoGCHandles[l].AddrOfPinnedObject();
                 }
+            }
 
-                if (outer == 0)
-                    Array.Clear(u, 0, ndof);
-
-                double tolRel = outer * 3 < maxOuterIter * 2 ? 1e-5 : 1e-7;
-
-                bool solvedGpuPcg = false;
-                bool solvedMgPcg = false;
-                var swLinear = Stopwatch.StartNew();
-                int mgPcgIters = 0;
-
-                if (canUseMgpcg && mgRhoArrays != null && fGpu != null && uGpu != null)
+            try
+            {
+                for (int outer = 0; outer < maxOuterIter; outer++)
                 {
-                    using (var pinned = new MgPinnedData(mgLevels))
+                    BuildDiagonal(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag);
+
+                    if (canUseMgpcg && mgRhoArrays != null)
                     {
-                        var rhoFloats = new float[mgLevels.Count][];
-                        var rhoHandles = new GCHandle[mgLevels.Count];
-                        try
+                        for (int e = 0; e < nElem; e++)
+                            mgRhoArrays[0][e] = StiffnessInterp(x[e], passive[e], eminClamped, simpP);
+                        for (int l = 1; l < mgLevels.Count; l++)
+                            MgGrid.PropagateRho(mgLevels[l - 1], mgLevels[l], mgRhoArrays[l - 1], mgRhoArrays[l]);
+                        for (int l = 0; l < mgLevels.Count; l++)
+                            MgGrid.RebuildDiag(mgLevels[l], mgRhoArrays[l],
+                                l == 0 ? passive : mgLevels[l].Passive, eminClamped, simpP);
+                    }
+
+                    if (outer == 0)
+                        Array.Clear(u, 0, ndof);
+
+                    double tolRel = outer * 3 < maxOuterIter * 2 ? 1e-5 : 1e-7;
+
+                    bool solvedGpuPcg = false;
+                    bool solvedMgPcg = false;
+                    var swLinear = Stopwatch.StartNew();
+                    int mgPcgIters = 0;
+
+                    if (canUseMgpcg && mgRhoArrays != null && mgRhoFloatsPinned != null && mgRhoPtrsPinned != null
+                        && fGpu != null && uGpu != null)
+                    {
+                        using (var pinned = new MgPinnedData(mgLevels))
                         {
-                            var rhoPtrs = new IntPtr[mgLevels.Count];
                             for (int l = 0; l < mgLevels.Count; l++)
                             {
-                                rhoFloats[l] = new float[mgLevels[l].NElem];
+                                var rf = mgRhoFloatsPinned[l];
                                 for (int e = 0; e < mgLevels[l].NElem; e++)
-                                    rhoFloats[l][e] = (float)mgRhoArrays[l][e];
-                                rhoHandles[l] = GCHandle.Alloc(rhoFloats[l], GCHandleType.Pinned);
-                                rhoPtrs[l] = rhoHandles[l].AddrOfPinnedObject();
+                                    rf[e] = (float)mgRhoArrays[l][e];
                             }
 
                             for (int i = 0; i < ndof; i++)
@@ -424,7 +442,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                                 gpuCtx,
                                 pinned.KeUnique, pinned.KeIdx, pinned.DofMap, pinned.Diag, pinned.Fixed,
                                 pinned.Prolong, pinned.ProlongW,
-                                rhoPtrs,
+                                mgRhoPtrsPinned,
                                 pinned.NElem, pinned.NDof, pinned.NumUnique,
                                 mgLevels.Count,
                                 fGpu, uGpu,
@@ -440,77 +458,80 @@ namespace GHGPUPlugin.Chromodoris.Topology
                                 solvedMgPcg = true;
                             }
                         }
-                        finally
+                    }
+
+                    if (!solvedGpuPcg && useGpu && gpuCtx != IntPtr.Zero && Ke_flat != null && dofMapFlat != null && rhoFlat != null
+                        && fixedBytes != null && fGpu != null && uGpu != null && diagGpu != null)
+                    {
+                        for (int e2 = 0; e2 < nElem; e2++)
+                            rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
+                        for (int i = 0; i < ndof; i++)
                         {
-                            for (int hi = 0; hi < rhoHandles.Length; hi++)
-                            {
-                                if (rhoHandles[hi].IsAllocated)
-                                    rhoHandles[hi].Free();
-                            }
+                            fGpu[i] = (float)f[i];
+                            uGpu[i] = (float)u[i];
+                            diagGpu[i] = (float)diag[i];
+                        }
+
+                        int pcgCode = MetalBridge.FemPcgSolve(
+                            gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
+                            (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
+
+                        if (pcgCode == 0)
+                        {
+                            for (int i = 0; i < ndof; i++)
+                                u[i] = uGpu[i];
+                            solvedGpuPcg = true;
                         }
                     }
-                }
 
-                if (!solvedGpuPcg && useGpu && gpuCtx != IntPtr.Zero && Ke_flat != null && dofMapFlat != null && rhoFlat != null
-                    && fixedBytes != null && fGpu != null && uGpu != null && diagGpu != null)
-                {
-                    for (int e2 = 0; e2 < nElem; e2++)
-                        rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
-                    for (int i = 0; i < ndof; i++)
+                    if (!solvedGpuPcg)
+                        PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag, f, u, y, r, zvec, pvec, Ap, matVecFn, maxPcgIter, tolRel);
+
+                    swLinear.Stop();
+                    res.LastLinearSolveMs = swLinear.Elapsed.TotalMilliseconds;
+                    res.LastLinearSolveUsedMgPcg = solvedMgPcg;
+                    res.LastLinearSolvePcgIters = solvedMgPcg ? mgPcgIters : 0;
+
+                    double C = Dot(f, u);
+
+                    for (int e = 0; e < nElem; e++)
                     {
-                        fGpu[i] = (float)f[i];
-                        uGpu[i] = (float)u[i];
-                        diagGpu[i] = (float)diag[i];
+                        double[,] K0 = K0e[e];
+                        for (int a = 0; a < 24; a++)
+                            ue[a] = u[dofMap[e, a]];
+                        double ce = Hex8BrickKe.ElementEnergy(K0, ue);
+                        if (!passive[e])
+                        {
+                            double dxrho = simpP * Math.Pow(x[e], simpP - 1.0) * (1.0 - eminClamped);
+                            dc[e] = -dxrho * ce;
+                        }
+                        else dc[e] = 0;
                     }
 
-                    int pcgCode = MetalBridge.FemPcgSolve(
-                        gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
-                        (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
+                    res.Compliance = C;
+                    OcUpdate(nElem, x, dc, passive, volTarget, moveLimit, 0.001, xNew);
 
-                    if (pcgCode == 0)
+                    double change = 0;
+                    for (int e = 0; e < nElem; e++)
                     {
-                        for (int i = 0; i < ndof; i++)
-                            u[i] = uGpu[i];
-                        solvedGpuPcg = true;
+                        change = Math.Max(change, Math.Abs(xNew[e] - x[e]));
+                        x[e] = xNew[e];
+                    }
+
+                    res.IterationsUsed = outer + 1;
+                    if (change < 0.01 && outer > 5) break;
+                }
+            }
+            finally
+            {
+                if (mgRhoGCHandles != null)
+                {
+                    for (int hi = 0; hi < mgRhoGCHandles.Length; hi++)
+                    {
+                        if (mgRhoGCHandles[hi].IsAllocated)
+                            mgRhoGCHandles[hi].Free();
                     }
                 }
-
-                if (!solvedGpuPcg)
-                    PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag, f, u, y, r, zvec, pvec, Ap, matVecFn, maxPcgIter, tolRel);
-
-                swLinear.Stop();
-                res.LastLinearSolveMs = swLinear.Elapsed.TotalMilliseconds;
-                res.LastLinearSolveUsedMgPcg = solvedMgPcg;
-                res.LastLinearSolvePcgIters = solvedMgPcg ? mgPcgIters : 0;
-
-                double C = Dot(f, u);
-
-                for (int e = 0; e < nElem; e++)
-                {
-                    double[,] K0 = K0e[e];
-                    for (int a = 0; a < 24; a++)
-                        ue[a] = u[dofMap[e, a]];
-                    double ce = Hex8BrickKe.ElementEnergy(K0, ue);
-                    if (!passive[e])
-                    {
-                        double dxrho = simpP * Math.Pow(x[e], simpP - 1.0) * (1.0 - eminClamped);
-                        dc[e] = -dxrho * ce;
-                    }
-                    else dc[e] = 0;
-                }
-
-                res.Compliance = C;
-                OcUpdate(nElem, x, dc, passive, volTarget, moveLimit, 0.001, xNew);
-
-                double change = 0;
-                for (int e = 0; e < nElem; e++)
-                {
-                    change = Math.Max(change, Math.Abs(xNew[e] - x[e]));
-                    x[e] = xNew[e];
-                }
-
-                res.IterationsUsed = outer + 1;
-                if (change < 0.01 && outer > 5) break;
             }
 
             var rhoCoarse = new float[nxc, nyc, nzc];
