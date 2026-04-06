@@ -73,42 +73,6 @@ public static class MetalBridge
         int nElem,
         int ndof);
 
-    [DllImport(LibName, EntryPoint = "mb_fem_matvec_unique", CallingConvention = CallingConvention.Cdecl)]
-    public static extern int FemMatVecUnique(
-        IntPtr ctx,
-        [In] float[] Ke_unique,
-        [In] int[] keIdx,
-        [In] int[] dofMap,
-        [In] float[] rho,
-        [In] float[] v_in,
-        [Out] float[] Av_out,
-        int numUnique,
-        int nElem,
-        int ndof);
-
-    [DllImport(LibName, EntryPoint = "mb_fem_mgpcg_solve", CallingConvention = CallingConvention.Cdecl)]
-    public static extern int FemMgPcgSolve(
-        IntPtr ctx,
-        [In] IntPtr[] mg_ke_unique,
-        [In] IntPtr[] mg_ke_idx,
-        [In] IntPtr[] mg_dof_map,
-        [In] IntPtr[] mg_diag,
-        [In] IntPtr[] mg_fixed,
-        [In] IntPtr[] mg_prolong,
-        [In] IntPtr[] mg_prolong_w,
-        [In] IntPtr[] mg_rho,
-        [In] int[] mg_nelem,
-        [In] int[] mg_ndof,
-        [In] int[] mg_num_unique,
-        int numLevels,
-        [In] float[] f_rhs,
-        [In, Out] float[] u_inout,
-        int maxIter,
-        float tolRel,
-        int nSmooth,
-        float omegaJacobi,
-        out int out_pcg_iters);
-
     [DllImport(LibName, EntryPoint = "mb_fem_pcg_solve", CallingConvention = CallingConvention.Cdecl)]
     public static extern int FemPcgSolve(
         IntPtr ctx,

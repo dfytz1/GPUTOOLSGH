@@ -25,11 +25,6 @@ If that folder is missing (different Rhino install), report it instead of failin
 
 1. **After every `dotnet build`** of this project in agent sessions — the `.csproj` already runs **`DeployToGrasshopperLibraries`** on build; if you only edited files without building, run **`cd GHGPUPlugin && dotnet build -c Release`** (or the same config the user asked for) so deploy runs.
 2. **After rebuilding MetalBridge** — rebuild the plugin so `MetalBridge.dylib` / `default.metallib` are copied into the output folder, then build **GHGPUPlugin** again (or copy those two files from `MetalBridge/build/Release/` and `MetalBridge/Kernels/` into **Libraries** alongside the `.gha`).
-3. **After any agent change** to **GHGPUPlugin**, **MetalBridge**, or **Shaders** that affects the running plugin — run **`xcodebuild`** (Release) on MetalBridge when `.mm`/`.metal` changed, then **`dotnet build GHGPUPlugin/GHGPUPlugin.csproj -c Release`** so the **Libraries** folder gets a fresh `.gha`, `MetalBridge.dylib`, and `default.metallib`. Do not skip deploy when the user expects to test in Rhino.
-
-## GitHub (push)
-
-When the user asks to update the remote (e.g. “push to GitHub”), or when finishing work that should be shared: **`git add`**, **`git commit`** with a concise message, **`git push origin`** (current branch). Ensure new Metal shaders and native sources are committed so a clean clone can build.
 
 ## Quick verify
 

@@ -70,43 +70,6 @@ int mb_fem_matvec(
     int nElem,
     int ndof);
 
-/// Matrix-free FEM stiffness × vector with per-element lookup into @p Ke_unique (hex8). No fixed-DOF penalty (unlike @ref mb_fem_matvec).
-int mb_fem_matvec_unique(
-    void* ctx,
-    const float* Ke_unique,
-    const int* keIdx,
-    const int* dofMap,
-    const float* rho,
-    const float* v_in,
-    float* Av_out,
-    int numUnique,
-    int nElem,
-    int ndof);
-
-/// Geometric multigrid–preconditioned PCG. @p mg_rho[l] is SIMP-interpolated density per level (caller must not re-apply penalty).
-/// @p mg_prolong[0] / mg_prolong_w[0] unused (may be null). @p out_pcg_iters optional (null if not needed).
-int mb_fem_mgpcg_solve(
-    void* ctx,
-    const float* const* mg_ke_unique,
-    const int* const* mg_ke_idx,
-    const int* const* mg_dof_map,
-    const float* const* mg_diag,
-    const unsigned char* const* mg_fixed,
-    const int* const* mg_prolong,
-    const float* const* mg_prolong_w,
-    const float* const* mg_rho,
-    const int* mg_nelem,
-    const int* mg_ndof,
-    const int* mg_num_unique,
-    int numLevels,
-    const float* f_rhs,
-    float* u_inout,
-    int maxIter,
-    float tolRel,
-    int nSmooth,
-    float omegaJacobi,
-    int* out_pcg_iters);
-
 /// Full PCG solve for one SIMP outer step; warm-start @p u_inout in/out; uploads @p rho, @p diag, @p f_rhs each call.
 int mb_fem_pcg_solve(
     void* ctx,

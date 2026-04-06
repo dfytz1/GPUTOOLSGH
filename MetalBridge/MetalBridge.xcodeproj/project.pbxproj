@@ -20,7 +20,6 @@
 		B20000000000000000000014 /* LaplacianConstrained.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LaplacianConstrained.metal; sourceTree = "<group>"; };
 		B20000000000000000000015 /* FemMatVec.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = FemMatVec.metal; sourceTree = "<group>"; };
 		B20000000000000000000018 /* FemPcg.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = FemPcg.metal; sourceTree = "<group>"; };
-		B20000000000000000000019 /* Multigrid.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Multigrid.metal; sourceTree = "<group>"; };
 		B20000000000000000000016 /* VoxelSample.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = VoxelSample.metal; sourceTree = "<group>"; };
 		B20000000000000000000017 /* ProximityBlend.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = ProximityBlend.metal; sourceTree = "<group>"; };
 		B30000000000000000000001 /* MetalBridge.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = MetalBridge.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -88,7 +87,6 @@
 				B20000000000000000000014 /* LaplacianConstrained.metal */,
 				B20000000000000000000015 /* FemMatVec.metal */,
 				B20000000000000000000018 /* FemPcg.metal */,
-				B20000000000000000000019 /* Multigrid.metal */,
 				B20000000000000000000016 /* VoxelSample.metal */,
 				B20000000000000000000017 /* ProximityBlend.metal */,
 			);

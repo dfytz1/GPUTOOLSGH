@@ -44,31 +44,6 @@ kernel void fem_matvec(
     }
 }
 
-kernel void fem_matvec_unique(
-    device const float* Ke_unique [[buffer(0)]],
-    device const int* keIdx [[buffer(1)]],
-    device const int* dofMap [[buffer(2)]],
-    device const float* rho [[buffer(3)]],
-    device const float* v [[buffer(4)]],
-    device atomic_uint* Av_u [[buffer(5)]],
-    device const int* nElem_buf [[buffer(6)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if ((int)gid >= *nElem_buf)
-        return;
-    int base = keIdx[gid] * 576;
-    float r = rho[gid];
-    float ve[24];
-    for (int b = 0; b < 24; b++)
-        ve[b] = v[dofMap[gid * 24 + b]];
-    for (int a = 0; a < 24; a++) {
-        float s = 0.f;
-        for (int b = 0; b < 24; b++)
-            s += Ke_unique[base + a * 24 + b] * ve[b];
-        atomic_add_float(&Av_u[dofMap[gid * 24 + a]], r * s);
-    }
-}
-
 // One thread per global DOF: add penalty * v once per fixed DOF (matches CPU MatVec).
 kernel void fem_apply_fixed_penalty(
     device atomic_uint* Av_u [[buffer(0)]],
