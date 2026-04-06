@@ -15,7 +15,7 @@ public class GH_LaplacianSmooth : GH_Component
             "LapSmoothGPU",
             "Umbrella Laplacian on topology vertices. No input mesh duplicate; CPU matches Chromodoris; GPU uses cached Metal context + batched submits.",
             "GPUTools",
-            "Smoothing")
+            "Mesh")
     {
     }
 

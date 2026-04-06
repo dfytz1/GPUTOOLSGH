@@ -21,4 +21,18 @@
     <None Include="..\MetalBridge\Kernels\default.metallib" Link="default.metallib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\Kernels\default.metallib')" />
   </ItemGroup>
 
+  <!-- Copy build outputs into Rhino 8 Grasshopper Libraries after every build (macOS). -->
+  <Target Name="DeployToGrasshopperLibraries" AfterTargets="Build">
+    <PropertyGroup>
+      <_GrasshopperLibraries>$(HOME)/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries</_GrasshopperLibraries>
+    </PropertyGroup>
+    <ItemGroup>
+      <_GrasshopperDeploy Include="$(TargetPath)" />
+      <_GrasshopperDeploy Include="$(TargetDir)MetalBridge.dylib" Condition="Exists('$(TargetDir)MetalBridge.dylib')" />
+      <_GrasshopperDeploy Include="$(TargetDir)default.metallib" Condition="Exists('$(TargetDir)default.metallib')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_GrasshopperDeploy)" DestinationFolder="$(_GrasshopperLibraries)" SkipUnchangedFiles="false" Condition="Exists('$(_GrasshopperLibraries)')" />
+    <Warning Text="Grasshopper Libraries folder not found; skipped copy to $(_GrasshopperLibraries)" Condition="!Exists('$(_GrasshopperLibraries)')" />
+  </Target>
+
 </Project>

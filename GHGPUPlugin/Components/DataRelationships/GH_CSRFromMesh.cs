@@ -14,7 +14,7 @@ public class GH_CSRFromMesh : GH_Component
             "MeshCSRGPU",
             "Topology-vertex adjacency in CSR form (column indices flat + row offsets). Extraction runs on the CPU.",
             "GPUTools",
-            "DataRelationships")
+            "Mesh")
     {
     }
 

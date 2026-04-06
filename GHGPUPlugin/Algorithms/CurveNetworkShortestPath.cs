@@ -1,10 +1,8 @@
-using System.Linq;
-using Rhino;
 using Rhino.Geometry;
 
 namespace GHGPUPlugin.Algorithms;
 
-/// <summary>Shortest path along a network of curves (Dijkstra); undirected edges weighted by segment length.</summary>
+/// <summary>Shortest path along a curve network (Dijkstra). Each curve is one undirected edge Start→End weighted by arc length.</summary>
 public static class CurveNetworkShortestPath
 {
     public static bool TryFindPath(
@@ -12,7 +10,6 @@ public static class CurveNetworkShortestPath
         Point3d startPt,
         Point3d endPt,
         double mergeTolerance,
-        double maxEdgeLength,
         double snapTolerance,
         out List<Point3d> path,
         out double length,
@@ -28,12 +25,6 @@ public static class CurveNetworkShortestPath
             return false;
         }
 
-        if (maxEdgeLength <= 0)
-        {
-            error = "Max edge length must be positive.";
-            return false;
-        }
-
         if (snapTolerance <= 0)
         {
             error = "Snap tolerance must be positive.";
@@ -41,6 +32,10 @@ public static class CurveNetworkShortestPath
         }
 
         var verts = new List<Point3d>();
+        var grid = new Dictionary<(long X, long Y, long Z), List<int>>();
+        double cell = mergeTolerance;
+        double mergeSq = mergeTolerance * mergeTolerance;
+
         var edges = new List<(int A, int B, double W)>();
 
         foreach (Curve c in curves)
@@ -48,29 +43,27 @@ public static class CurveNetworkShortestPath
             if (c == null || !c.IsValid)
                 continue;
 
-            if (!TrySampleCurve(c, maxEdgeLength, out List<Point3d>? pts) || pts == null || pts.Count < 2)
+            Point3d pa = c.PointAtStart;
+            Point3d pb = c.PointAtEnd;
+            int a = AddOrGetVertex(verts, grid, cell, mergeSq, pa);
+            int b = AddOrGetVertex(verts, grid, cell, mergeSq, pb);
+            if (a == b)
                 continue;
 
-            for (int i = 0; i < pts.Count - 1; i++)
-            {
-                int a = AddOrGetVertex(verts, pts[i], mergeTolerance);
-                int b = AddOrGetVertex(verts, pts[i + 1], mergeTolerance);
-                if (a == b)
-                    continue;
-                double w = pts[i].DistanceTo(pts[i + 1]);
-                edges.Add((a, b, w));
-                edges.Add((b, a, w));
-            }
+            double w = c.GetLength();
+            edges.Add((a, b, w));
+            edges.Add((b, a, w));
         }
 
         if (verts.Count == 0)
         {
-            error = "No usable curve segments (need at least one curve with two or more sample points).";
+            error = "No usable curves (need at least one valid curve with distinct merged endpoints).";
             return false;
         }
 
-        int startV = NearestVertexWithin(verts, startPt, snapTolerance, out _);
-        int endV = NearestVertexWithin(verts, endPt, snapTolerance, out _);
+        int snapRadiusCells = (int)Math.Ceiling(snapTolerance / mergeTolerance);
+        int startV = NearestVertexWithinGrid(verts, grid, cell, startPt, snapTolerance, snapRadiusCells, out _);
+        int endV = NearestVertexWithinGrid(verts, grid, cell, endPt, snapTolerance, snapRadiusCells, out _);
         if (startV < 0)
         {
             error = "Start point is too far from the curve network (increase Snap tolerance or move the point).";
@@ -155,67 +148,90 @@ public static class CurveNetworkShortestPath
         return true;
     }
 
-    private static int AddOrGetVertex(List<Point3d> verts, Point3d p, double tol)
+    private static (long X, long Y, long Z) CellOf(Point3d p, double cell)
     {
-        double tolSq = tol * tol;
-        for (int i = 0; i < verts.Count; i++)
-        {
-            if (verts[i].DistanceToSquared(p) <= tolSq)
-                return i;
-        }
-
-        verts.Add(p);
-        return verts.Count - 1;
+        return (
+            (long)Math.Floor(p.X / cell),
+            (long)Math.Floor(p.Y / cell),
+            (long)Math.Floor(p.Z / cell));
     }
 
-    private static int NearestVertexWithin(List<Point3d> verts, Point3d p, double maxDist, out double bestD)
+    /// <summary>Merges with an existing vertex within merge tolerance using a 3×3×3 cell neighborhood.</summary>
+    private static int AddOrGetVertex(
+        List<Point3d> verts,
+        Dictionary<(long X, long Y, long Z), List<int>> grid,
+        double cell,
+        double mergeSq,
+        Point3d p)
+    {
+        (long cx, long cy, long cz) = CellOf(p, cell);
+
+        for (long dx = -1; dx <= 1; dx++)
+        for (long dy = -1; dy <= 1; dy++)
+        for (long dz = -1; dz <= 1; dz++)
+        {
+            var key = (cx + dx, cy + dy, cz + dz);
+            if (!grid.TryGetValue(key, out List<int>? bucket))
+                continue;
+            for (int i = 0; i < bucket.Count; i++)
+            {
+                int vi = bucket[i];
+                if (verts[vi].DistanceToSquared(p) <= mergeSq)
+                    return vi;
+            }
+        }
+
+        int idx = verts.Count;
+        verts.Add(p);
+        var home = (cx, cy, cz);
+        if (!grid.TryGetValue(home, out List<int>? list))
+        {
+            list = new List<int>();
+            grid[home] = list;
+        }
+
+        list.Add(idx);
+        return idx;
+    }
+
+    /// <summary>Nearest vertex within <paramref name="maxDist"/> by scanning grid cells in a cube of half-size <paramref name="radiusCells"/> (in cell units).</summary>
+    private static int NearestVertexWithinGrid(
+        List<Point3d> verts,
+        Dictionary<(long X, long Y, long Z), List<int>> grid,
+        double cell,
+        Point3d p,
+        double maxDist,
+        int radiusCells,
+        out double bestD)
     {
         int best = -1;
         bestD = double.MaxValue;
         double maxSq = maxDist * maxDist;
-        for (int i = 0; i < verts.Count; i++)
+        (long cx, long cy, long cz) = CellOf(p, cell);
+
+        long r = radiusCells;
+        for (long dx = -r; dx <= r; dx++)
+        for (long dy = -r; dy <= r; dy++)
+        for (long dz = -r; dz <= r; dz++)
         {
-            double d2 = verts[i].DistanceToSquared(p);
-            if (d2 > maxSq)
+            var key = (cx + dx, cy + dy, cz + dz);
+            if (!grid.TryGetValue(key, out List<int>? bucket))
                 continue;
-            double d = Math.Sqrt(d2);
-            if (best < 0 || d < bestD)
+            for (int i = 0; i < bucket.Count; i++)
             {
-                bestD = d;
-                best = i;
+                int vi = bucket[i];
+                double d2 = verts[vi].DistanceToSquared(p);
+                if (d2 > maxSq)
+                    continue;
+                double d = Math.Sqrt(d2);
+                if (best < 0 || d < bestD)
+                {
+                    bestD = d;
+                    best = vi;
+                }
             }
         }
 
         return best;
-    }
-
-    private static bool TrySampleCurve(Curve crv, double maxEdgeLength, out List<Point3d>? points)
-    {
-        points = null;
-        if (crv.TryGetPolyline(out Polyline pl))
-        {
-            points = new List<Point3d>(pl.Count);
-            for (int i = 0; i < pl.Count; i++)
-                points.Add(pl[i]);
-            return points.Count >= 2;
-        }
-
-        if (crv.IsLinear(RhinoMath.ZeroTolerance))
-        {
-            points = new List<Point3d> { crv.PointAtStart, crv.PointAtEnd };
-            return true;
-        }
-
-        double len = crv.GetLength();
-        if (len < 1e-12)
-            return false;
-
-        int segCount = Math.Max(1, (int)Math.Ceiling(len / maxEdgeLength));
-        double[]? ts = crv.DivideByCount(segCount, true);
-        if (ts == null || ts.Length < 2)
-            return false;
-
-        points = ts.Select(t => crv.PointAt(t)).ToList();
-        return points.Count >= 2;
     }
 }
