@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>GHGPUPlugin</RootNamespace>
+    <AssemblyName>GHGPUPlugin</AssemblyName>
+    <TargetExt>.gha</TargetExt>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grasshopper" Version="8.*" />
+    <PackageReference Include="RhinoCommon" Version="8.*" />
+    <PackageReference Include="System.Drawing.Common" Version="7.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\MetalBridge\build\Release\MetalBridge.dylib" Link="MetalBridge.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\build\Release\MetalBridge.dylib')" />
+    <None Include="..\MetalBridge\Kernels\default.metallib" Link="default.metallib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\Kernels\default.metallib')" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,21 @@
+# .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userosscache
+
+# Xcode / MetalBridge
+MetalBridge/build/
+*.xcuserstate
+DerivedData/
+
+# Compiled Metal (rebuild with MetalBridge/compile_kernels.sh)
+MetalBridge/Kernels/default.metallib
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vs/

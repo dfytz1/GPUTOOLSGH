@@ -1,0 +1,21 @@
+---
+description: GHGPUPlugin / MetalBridge performance — avoid known slow patterns
+globs: GHGPUPlugin/**/*.cs,MetalBridge/**/*
+alwaysApply: false
+---
+
+# GHGPUPlugin performance (Rhino 8 / Grasshopper / Metal)
+
+## Do not repeat these mistakes
+
+1. **Never call `Mesh.DuplicateMesh()` for “read-only” geometry** when you only need connectivity or positions. Read from the input mesh; build the **output** with Chromodoris-style `new Mesh()` + `AddVertices` + `AddFaces` (see `MeshTopologyNeighbors.SmoothedMeshFromTopology`).
+
+2. **Do not call `ConnectedTopologyVertices(i)` in a loop over all topology vertices** for adjacency. Use **one pass over `TopologyEdges`** (`MeshTopologyNeighbors.NeighborsFromEdges`).
+
+3. **Never `MetalBridge.CreateContext` / `DestroyContext` per Grasshopper solve.** Use **`MetalSharedContext.TryGetContext`** so the metallib and pipelines load once per process.
+
+4. **Do not sync CPU↔GPU every Laplacian iteration** (`commit`/`wait` per step). Batch iterations in **one** command buffer (`mb_run_laplacian_iterations`).
+
+5. **Mesh closest-point:** avoid `DuplicateMesh` when **every face is already a triangle**; only duplicate + `ConvertQuadsToTriangles` when needed.
+
+6. **Avoid caps on user iteration counts** unless there is a hard resource limit; do not arbitrarily cap (e.g. 10k) for “safety” without a documented reason.
