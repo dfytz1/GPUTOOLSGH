@@ -211,12 +211,6 @@ namespace GHGPUPlugin.Chromodoris.Topology
             int nyc = inside.GetLength(1);
             int nzc = inside.GetLength(2);
 
-            int nElem = 0;
-            for (int i = 0; i < nxc; i++)
-                for (int j = 0; j < nyc; j++)
-                    for (int k = 0; k < nzc; k++)
-                        if (inside[i, j, k] >= 0.5f) nElem++;
-
             var nodeUsed = new bool[nxc + 1, nyc + 1, nzc + 1];
             var supN = new bool[nxc + 1, nyc + 1, nzc + 1];
             var loadN = new bool[nxc + 1, nyc + 1, nzc + 1];
@@ -250,6 +244,21 @@ namespace GHGPUPlugin.Chromodoris.Topology
                         if (nodeUsed[i, j, k])
                             nid[i, j, k] = nNodes++;
 
+            int nElem = 0;
+            for (int i = 0; i < nxc; i++)
+                for (int j = 0; j < nyc; j++)
+                    for (int k = 0; k < nzc; k++)
+                    {
+                        if (inside[i, j, k] < 0.5f) continue;
+                        int[] cnCount = {
+                            nid[i, j, k], nid[i + 1, j, k], nid[i + 1, j + 1, k], nid[i, j + 1, k],
+                            nid[i, j, k + 1], nid[i + 1, j, k + 1], nid[i + 1, j + 1, k + 1], nid[i, j + 1, k + 1]
+                        };
+                        bool validCorners = true;
+                        foreach (int c in cnCount) if (c < 0) { validCorners = false; break; }
+                        if (validCorners) nElem++;
+                    }
+
             int ndof = 3 * nNodes;
             var fixedDof = new bool[ndof];
             for (int i = 0; i <= nxc; i++)
@@ -279,6 +288,13 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     for (int k = 0; k < nzc; k++)
                     {
                         if (inside[i, j, k] < 0.5f) continue;
+                        int[] cn = {
+                            nid[i, j, k], nid[i + 1, j, k], nid[i + 1, j + 1, k], nid[i, j + 1, k],
+                            nid[i, j, k + 1], nid[i + 1, j, k + 1], nid[i + 1, j + 1, k + 1], nid[i, j + 1, k + 1]
+                        };
+                        bool validCorners = true;
+                        foreach (int c in cn) if (c < 0) { validCorners = false; break; }
+                        if (!validCorners) continue;
                         ex[ei] = i;
                         ey[ei] = j;
                         ez[ei] = k;
@@ -288,10 +304,6 @@ namespace GHGPUPlugin.Chromodoris.Topology
                         elWz[ei] = wz;
                         passive[ei] = support[i, j, k] >= 0.5f || load[i, j, k] >= 0.5f;
 
-                        int[] cn = {
-                            nid[i, j, k], nid[i + 1, j, k], nid[i + 1, j + 1, k], nid[i, j + 1, k],
-                            nid[i, j, k + 1], nid[i + 1, j, k + 1], nid[i + 1, j + 1, k + 1], nid[i, j + 1, k + 1]
-                        };
                         for (int n = 0; n < 8; n++)
                         {
                             int g = cn[n] * 3;
@@ -395,6 +407,9 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     fine.DofMapCpu[e, 0] / 3, fine.DofMapCpu[e, 3] / 3, fine.DofMapCpu[e, 6] / 3, fine.DofMapCpu[e, 9] / 3,
                     fine.DofMapCpu[e, 12] / 3, fine.DofMapCpu[e, 15] / 3, fine.DofMapCpu[e, 18] / 3, fine.DofMapCpu[e, 21] / 3
                 };
+                bool validCorners = true;
+                foreach (int c in cn) if (c < 0) { validCorners = false; break; }
+                if (!validCorners) continue;
                 int[] I = { i, i + 1, i + 1, i, i, i + 1, i + 1, i };
                 int[] J = { j, j, j + 1, j + 1, j, j, j + 1, j + 1 };
                 int[] K = { k, k, k, k, k + 1, k + 1, k + 1, k + 1 };
@@ -420,6 +435,9 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     coarse.DofMapCpu[e, 0] / 3, coarse.DofMapCpu[e, 3] / 3, coarse.DofMapCpu[e, 6] / 3, coarse.DofMapCpu[e, 9] / 3,
                     coarse.DofMapCpu[e, 12] / 3, coarse.DofMapCpu[e, 15] / 3, coarse.DofMapCpu[e, 18] / 3, coarse.DofMapCpu[e, 21] / 3
                 };
+                bool validCorners = true;
+                foreach (int c in cn) if (c < 0) { validCorners = false; break; }
+                if (!validCorners) continue;
                 int[] I = { i, i + 1, i + 1, i, i, i + 1, i + 1, i };
                 int[] J = { j, j, j + 1, j + 1, j, j, j + 1, j + 1 };
                 int[] K = { k, k, k, k, k + 1, k + 1, k + 1, k + 1 };
