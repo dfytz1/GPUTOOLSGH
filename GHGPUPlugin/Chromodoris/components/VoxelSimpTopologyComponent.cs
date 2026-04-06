@@ -95,34 +95,41 @@ namespace GHGPUPlugin.Chromodoris
                 FallbackOutputs(box);
                 return;
             }
+
+            static int ReadIntCoerce(IGH_DataAccess da, int index, int fallback)
+            {
+                IGH_Goo goo = null;
+                if (!da.GetData(index, ref goo) || goo == null)
+                    return fallback;
+
+                if (goo is GH_Integer gi)
+                    return gi.Value;
+                if (goo is GH_Number gn)
+                    return (int)Math.Round(gn.Value);
+
+                object sv = goo.ScriptVariable();
+                if (sv is int i)
+                    return i;
+                if (sv is double d)
+                    return (int)Math.Round(d);
+                if (sv is float f)
+                    return (int)Math.Round(f);
+
+                return fallback;
+            }
+
             DA.GetData(4, ref vf);
-            {
-                double tmp = outer;
-                DA.GetData(5, ref tmp);
-                outer = (int)Math.Round(tmp);
-            }
-            {
-                double tmp = pcg;
-                DA.GetData(6, ref tmp);
-                pcg = (int)Math.Round(tmp);
-            }
+            outer = ReadIntCoerce(DA, 5, outer);
+            pcg = ReadIntCoerce(DA, 6, pcg);
             DA.GetData(7, ref simpP);
             DA.GetData(8, ref move);
             DA.GetData(9, ref emin);
             DA.GetData(10, ref nu);
-            {
-                double tmp = maxEl;
-                DA.GetData(11, ref tmp);
-                maxEl = (int)Math.Round(tmp);
-            }
+            maxEl = ReadIntCoerce(DA, 11, maxEl);
             DA.GetData(12, ref fx);
             DA.GetData(13, ref fy);
             DA.GetData(14, ref fz);
-            {
-                double tmp = solveStride;
-                DA.GetData(15, ref tmp);
-                solveStride = (int)Math.Round(tmp);
-            }
+            solveStride = ReadIntCoerce(DA, 15, solveStride);
             DA.GetData(16, ref useGpu);
 
             if (useGpu)
