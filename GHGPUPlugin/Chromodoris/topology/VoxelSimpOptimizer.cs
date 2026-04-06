@@ -2,6 +2,8 @@ using GHGPUPlugin.NativeInterop;
 using Rhino.Geometry;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace GHGPUPlugin.Chromodoris.Topology
 {
@@ -20,6 +22,18 @@ namespace GHGPUPlugin.Chromodoris.Topology
             public double Compliance;
             public int IterationsUsed;
             public string Message;
+
+            /// <summary>True if the last linear solve used GPU MGPCG (not CPU PCG fallback).</summary>
+            public bool LastLinearSolveUsedMgPcg;
+
+            /// <summary>PCG iterations reported by the last GPU MGPCG solve; 0 if the last solve was not MGPCG.</summary>
+            public int LastLinearSolvePcgIters;
+
+            /// <summary>Wall time for the last linear solve (MGPCG, GPU PCG, or CPU PCG), in milliseconds.</summary>
+            public double LastLinearSolveMs;
+
+            /// <summary>Multigrid level count from <see cref="MgGrid.BuildHierarchy"/> (1 if coarsening did not produce a hierarchy).</summary>
+            public int MgLevelCount;
         }
 
         public static Result Run(
@@ -247,6 +261,24 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 K0e[e] = K0;
             }
 
+            var keKeyToIdx = new Dictionary<(int, int, int), int>();
+            var uniqueKeList = new List<double[,]>();
+            foreach (var kv in keCache)
+            {
+                keKeyToIdx[kv.Key] = uniqueKeList.Count;
+                uniqueKeList.Add(kv.Value);
+            }
+
+            int numUniqueKe = uniqueKeList.Count;
+            var elemKeIdx = new int[nElem];
+            for (int e = 0; e < nElem; e++)
+                elemKeIdx[e] = keKeyToIdx[(elWx[e], elWy[e], elWz[e])];
+            var Ke_flat_unique = new float[numUniqueKe * 24 * 24];
+            for (int uq = 0; uq < numUniqueKe; uq++)
+                for (int a = 0; a < 24; a++)
+                    for (int b = 0; b < 24; b++)
+                        Ke_flat_unique[uq * 576 + a * 24 + b] = (float)uniqueKeList[uq][a, b];
+
             var x = new double[nElem];
             var xNew = new double[nElem];
             var dc = new double[nElem];
@@ -264,13 +296,30 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             double eminClamped = Math.Max(1e-9, Math.Min(emin, 0.5));
 
+            var mgLevels = MgGrid.BuildHierarchy(
+                inside, support, load, nx, ny, nz, S, dxFine, dyFine, dzFine, nu, maxLevels: 4);
+            res.MgLevelCount = mgLevels.Count;
+
             IntPtr gpuCtx = IntPtr.Zero;
             bool useGpu = useGpuMatVec && MetalSharedContext.TryGetContext(out gpuCtx);
+            bool canUseMgpcg = useGpu && mgLevels.Count >= 2;
+            double[][]? mgRhoArrays = null;
+            if (canUseMgpcg)
+            {
+                mgRhoArrays = new double[mgLevels.Count][];
+                mgRhoArrays[0] = new double[nElem];
+                for (int l = 1; l < mgLevels.Count; l++)
+                    mgRhoArrays[l] = new double[mgLevels[l].NElem];
+            }
             float[] Ke_flat = null;
             int[] dofMapFlat = null;
             float[] rhoFlat = null;
             float[] vFlat = null;
             float[] AvFlat = null;
+            byte[] fixedBytes = null;
+            float[] fGpu = null;
+            float[] uGpu = null;
+            float[] diagGpu = null;
 
             if (useGpu)
             {
@@ -279,6 +328,12 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 rhoFlat = new float[nElem];
                 vFlat = new float[ndof];
                 AvFlat = new float[ndof];
+                fixedBytes = new byte[ndof];
+                fGpu = new float[ndof];
+                uGpu = new float[ndof];
+                diagGpu = new float[ndof];
+                for (int i = 0; i < ndof; i++)
+                    fixedBytes[i] = fixedDof[i] ? (byte)1 : (byte)0;
 
                 for (int e = 0; e < nElem; e++)
                 {
@@ -302,15 +357,13 @@ namespace GHGPUPlugin.Chromodoris.Topology
                         vFlat[i] = (float)vecIn[i];
 
                     int code = MetalBridge.FemMatVec(
-                        gpuCtx, Ke_flat, dofMapFlat, rhoFlat, vFlat, AvFlat, nElem, ndof);
+                        gpuCtx, Ke_flat, dofMapFlat, rhoFlat, vFlat, AvFlat,
+                        fixedBytes, (float)Penalty, nElem, ndof);
 
                     if (code == 0)
                     {
                         for (int i = 0; i < ndof; i++)
                             vecOut[i] = AvFlat[i];
-                        for (int i = 0; i < ndof; i++)
-                            if (fixedDof[i])
-                                vecOut[i] += Penalty * vecIn[i];
                         return;
                     }
                 }
@@ -322,11 +375,113 @@ namespace GHGPUPlugin.Chromodoris.Topology
             {
                 BuildDiagonal(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag);
 
+                if (canUseMgpcg && mgRhoArrays != null)
+                {
+                    for (int e = 0; e < nElem; e++)
+                        mgRhoArrays[0][e] = StiffnessInterp(x[e], passive[e], eminClamped, simpP);
+                    for (int l = 1; l < mgLevels.Count; l++)
+                        MgGrid.PropagateRho(mgLevels[l - 1], mgLevels[l], mgRhoArrays[l - 1], mgRhoArrays[l]);
+                    for (int l = 0; l < mgLevels.Count; l++)
+                        MgGrid.RebuildDiag(mgLevels[l], mgRhoArrays[l],
+                            l == 0 ? passive : mgLevels[l].Passive, eminClamped, simpP);
+                }
+
                 if (outer == 0)
                     Array.Clear(u, 0, ndof);
 
                 double tolRel = outer * 3 < maxOuterIter * 2 ? 1e-5 : 1e-7;
-                PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag, f, u, y, r, zvec, pvec, Ap, matVecFn, maxPcgIter, tolRel);
+
+                bool solvedGpuPcg = false;
+                bool solvedMgPcg = false;
+                var swLinear = Stopwatch.StartNew();
+                int mgPcgIters = 0;
+
+                if (canUseMgpcg && mgRhoArrays != null && fGpu != null && uGpu != null)
+                {
+                    using (var pinned = new MgPinnedData(mgLevels))
+                    {
+                        var rhoFloats = new float[mgLevels.Count][];
+                        var rhoHandles = new GCHandle[mgLevels.Count];
+                        try
+                        {
+                            var rhoPtrs = new IntPtr[mgLevels.Count];
+                            for (int l = 0; l < mgLevels.Count; l++)
+                            {
+                                rhoFloats[l] = new float[mgLevels[l].NElem];
+                                for (int e = 0; e < mgLevels[l].NElem; e++)
+                                    rhoFloats[l][e] = (float)mgRhoArrays[l][e];
+                                rhoHandles[l] = GCHandle.Alloc(rhoFloats[l], GCHandleType.Pinned);
+                                rhoPtrs[l] = rhoHandles[l].AddrOfPinnedObject();
+                            }
+
+                            for (int i = 0; i < ndof; i++)
+                            {
+                                fGpu[i] = (float)f[i];
+                                uGpu[i] = (float)u[i];
+                            }
+
+                            int mgCode = MetalBridge.FemMgPcgSolve(
+                                gpuCtx,
+                                pinned.KeUnique, pinned.KeIdx, pinned.DofMap, pinned.Diag, pinned.Fixed,
+                                pinned.Prolong, pinned.ProlongW,
+                                rhoPtrs,
+                                pinned.NElem, pinned.NDof, pinned.NumUnique,
+                                mgLevels.Count,
+                                fGpu, uGpu,
+                                maxPcgIter, (float)tolRel,
+                                nSmooth: 2, omegaJacobi: 0.67f,
+                                out mgPcgIters);
+
+                            if (mgCode == 0)
+                            {
+                                for (int i = 0; i < ndof; i++)
+                                    u[i] = uGpu[i];
+                                solvedGpuPcg = true;
+                                solvedMgPcg = true;
+                            }
+                        }
+                        finally
+                        {
+                            for (int hi = 0; hi < rhoHandles.Length; hi++)
+                            {
+                                if (rhoHandles[hi].IsAllocated)
+                                    rhoHandles[hi].Free();
+                            }
+                        }
+                    }
+                }
+
+                if (!solvedGpuPcg && useGpu && gpuCtx != IntPtr.Zero && Ke_flat != null && dofMapFlat != null && rhoFlat != null
+                    && fixedBytes != null && fGpu != null && uGpu != null && diagGpu != null)
+                {
+                    for (int e2 = 0; e2 < nElem; e2++)
+                        rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
+                    for (int i = 0; i < ndof; i++)
+                    {
+                        fGpu[i] = (float)f[i];
+                        uGpu[i] = (float)u[i];
+                        diagGpu[i] = (float)diag[i];
+                    }
+
+                    int pcgCode = MetalBridge.FemPcgSolve(
+                        gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
+                        (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
+
+                    if (pcgCode == 0)
+                    {
+                        for (int i = 0; i < ndof; i++)
+                            u[i] = uGpu[i];
+                        solvedGpuPcg = true;
+                    }
+                }
+
+                if (!solvedGpuPcg)
+                    PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag, f, u, y, r, zvec, pvec, Ap, matVecFn, maxPcgIter, tolRel);
+
+                swLinear.Stop();
+                res.LastLinearSolveMs = swLinear.Elapsed.TotalMilliseconds;
+                res.LastLinearSolveUsedMgPcg = solvedMgPcg;
+                res.LastLinearSolvePcgIters = solvedMgPcg ? mgPcgIters : 0;
 
                 double C = Dot(f, u);
 
@@ -381,6 +536,9 @@ namespace GHGPUPlugin.Chromodoris.Topology
             {
                 UpsampleTrilinear(rhoCoarse, nxc, nyc, nzc, nx, ny, nz, insideFine, res.DensityPhys);
             }
+
+            GC.KeepAlive(elemKeIdx);
+            GC.KeepAlive(Ke_flat_unique);
 
             res.Message = "OK";
             return res;

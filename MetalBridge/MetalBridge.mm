@@ -1,12 +1,15 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
 #include <vector>
 
 #include "MetalBridge.h"
+
+#define MB_MG_MAX_LEVELS 4
 
 namespace {
 
@@ -27,8 +30,80 @@ struct MBContext {
     id<MTLComputePipelineState> zeroVoxelBoundaryPso = nil;
     id<MTLComputePipelineState> laplacianConstrainedPso = nil;
     id<MTLComputePipelineState> femMatVecPso = nil;
+    id<MTLComputePipelineState> femFixedPenaltyPso = nil;
+    id<MTLComputePipelineState> pcgAxpyPso = nil;
+    id<MTLComputePipelineState> pcgPrecondPso = nil;
+    id<MTLComputePipelineState> pcgDotPartialPso = nil;
+    id<MTLComputePipelineState> pcgReduceLevelPso = nil;
+    id<MTLComputePipelineState> pcgReducePso = nil;
+    id<MTLComputePipelineState> pcgCopyPso = nil;
+    id<MTLComputePipelineState> pcgUintToFloatPso = nil;
     id<MTLComputePipelineState> voxelSamplePso = nil;
     id<MTLComputePipelineState> proximityBlendPso = nil;
+
+    id<MTLComputePipelineState> femMatVecUniquePso = nil;
+    id<MTLComputePipelineState> mgJacobiPso = nil;
+    id<MTLComputePipelineState> mgResidualPso = nil;
+    id<MTLComputePipelineState> mgRestrictPso = nil;
+    id<MTLComputePipelineState> mgProlongatePso = nil;
+    id<MTLComputePipelineState> mgZeroPso = nil;
+    id<MTLComputePipelineState> mgZeroUintPso = nil;
+    id<MTLComputePipelineState> mgPcgAxpyPso = nil;
+    id<MTLComputePipelineState> mgPcgPrecondPso = nil;
+    id<MTLComputePipelineState> mgPcgDotPartialPso = nil;
+    id<MTLComputePipelineState> mgPcgReduceLevelPso = nil;
+    id<MTLComputePipelineState> mgPcgReducePso = nil;
+
+    id<MTLBuffer> fmuKe = nil;
+    id<MTLBuffer> fmuKeIdx = nil;
+    id<MTLBuffer> fmuDofMap = nil;
+    id<MTLBuffer> fmuRho = nil;
+    id<MTLBuffer> fmuV = nil;
+    id<MTLBuffer> fmuAv = nil;
+    id<MTLBuffer> fmuNElem = nil;
+    int fmuCachedNElem = -1;
+    int fmuCachedNumUniq = -1;
+
+    id<MTLBuffer> mgKeUnique[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgKeIdx[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgDofMap[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgDiag[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgFixed[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgProlong[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgProlongW[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgNElemBuf[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgNDofBuf[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgNumUniqBuf[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgX[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgB[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgR[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgAx[MB_MG_MAX_LEVELS];
+    id<MTLBuffer> mgRho[MB_MG_MAX_LEVELS];
+
+    id<MTLBuffer> mgPcgP = nil;
+    id<MTLBuffer> mgPcgZ = nil;
+    id<MTLBuffer> mgVcRhs = nil;
+    id<MTLBuffer> mgVcSol = nil;
+    id<MTLBuffer> mgPcgPartials = nil;
+    id<MTLBuffer> mgPcgPartials2 = nil;
+    id<MTLBuffer> mgPcgReduceCount = nil;
+    id<MTLBuffer> mgPcgResult = nil;
+    id<MTLBuffer> mgOmega = nil;
+    id<MTLBuffer> mgPenaltyBuf = nil;
+    id<MTLBuffer> mgScratchN = nil;
+    id<MTLBuffer> mgAxpyOne = nil;
+    id<MTLBuffer> mgAxpyZero = nil;
+    id<MTLBuffer> mgPcgAlpha = nil;
+    id<MTLBuffer> mgPcgNegAlpha = nil;
+    id<MTLBuffer> mgPcgBeta = nil;
+    id<MTLBuffer> mgPcgNegOne = nil;
+
+    int mgCachedNElem[MB_MG_MAX_LEVELS];
+    int mgCachedNDof[MB_MG_MAX_LEVELS];
+    int mgCachedNumUnique[MB_MG_MAX_LEVELS];
+    int mgCachedNElem0 = -1;
+    int mgNumLevels = 0;
+    NSUInteger mgDotTpg = 256u;
 
     // Laplacian: reuse GPU memory across iterations (topology size must match).
     id<MTLBuffer> lapBxIn = nil;
@@ -91,6 +166,39 @@ struct MBContext {
     id<MTLBuffer> jfaBStep = nil;
     int jfaCachedPointCount = -1;
     int jfaCachedResolution = -1;
+
+    // FEM / PCG persistent cache (sizes keyed by femCachedNElem / femCachedNDof)
+    id<MTLBuffer> femKe = nil;
+    id<MTLBuffer> femDofMap = nil;
+    id<MTLBuffer> femRho = nil;
+    id<MTLBuffer> femV = nil;
+    id<MTLBuffer> femAv = nil;
+    id<MTLBuffer> femAvFloat = nil;
+    id<MTLBuffer> femFixedMask = nil;
+    id<MTLBuffer> femPenalty = nil;
+    id<MTLBuffer> femNElem = nil;
+    id<MTLBuffer> femNDof = nil;
+
+    id<MTLBuffer> pcgU = nil;
+    id<MTLBuffer> pcgR = nil;
+    id<MTLBuffer> pcgZ = nil;
+    id<MTLBuffer> pcgP = nil;
+    id<MTLBuffer> pcgDiag = nil;
+    id<MTLBuffer> pcgF = nil;
+
+    id<MTLBuffer> pcgAlpha = nil;
+    id<MTLBuffer> pcgBeta = nil;
+    id<MTLBuffer> pcgNegAlpha = nil;
+    id<MTLBuffer> pcgOne = nil;
+    id<MTLBuffer> pcgNegOne = nil;
+    id<MTLBuffer> pcgScalarOut = nil;
+    id<MTLBuffer> pcgPartials = nil;
+    id<MTLBuffer> pcgPartials2 = nil;
+    id<MTLBuffer> pcgReduceCount = nil;
+
+    int femCachedNElem = -1;
+    int femCachedNDof = -1;
+    NSUInteger pcgDotTpg = 256u;
 };
 
 void ReleaseCpMeshCache(MBContext* mb)
@@ -119,6 +227,119 @@ void ReleaseJfaCache(MBContext* mb)
     mb->jfaBN = mb->jfaBRes = nil;
     mb->jfaBEdges = mb->jfaBStep = nil;
     mb->jfaCachedPointCount = mb->jfaCachedResolution = -1;
+}
+
+void ReleaseFemPcgCache(MBContext* mb)
+{
+    mb->femKe = mb->femDofMap = mb->femRho = mb->femV = mb->femAv = nil;
+    mb->femAvFloat = nil;
+    mb->femFixedMask = mb->femPenalty = mb->femNElem = mb->femNDof = nil;
+    mb->pcgU = mb->pcgR = mb->pcgZ = mb->pcgP = nil;
+    mb->pcgDiag = mb->pcgF = nil;
+    mb->pcgAlpha = mb->pcgBeta = mb->pcgNegAlpha = mb->pcgOne = mb->pcgNegOne = mb->pcgScalarOut = nil;
+    mb->pcgPartials = mb->pcgPartials2 = mb->pcgReduceCount = nil;
+    mb->femCachedNElem = mb->femCachedNDof = -1;
+}
+
+void ReleaseFmuCache(MBContext* mb)
+{
+    mb->fmuKe = mb->fmuKeIdx = mb->fmuDofMap = mb->fmuRho = mb->fmuV = mb->fmuAv = nil;
+    mb->fmuNElem = nil;
+    mb->fmuCachedNElem = mb->fmuCachedNumUniq = -1;
+}
+
+void ReleaseMgHierarchy(MBContext* mb)
+{
+    for (int i = 0; i < MB_MG_MAX_LEVELS; i++) {
+        mb->mgKeUnique[i] = mb->mgKeIdx[i] = mb->mgDofMap[i] = mb->mgDiag[i] = mb->mgFixed[i] = nil;
+        mb->mgProlong[i] = mb->mgProlongW[i] = mb->mgNElemBuf[i] = mb->mgNDofBuf[i] = mb->mgNumUniqBuf[i] = nil;
+        mb->mgX[i] = mb->mgB[i] = mb->mgR[i] = mb->mgAx[i] = mb->mgRho[i] = nil;
+        mb->mgCachedNElem[i] = mb->mgCachedNDof[i] = mb->mgCachedNumUnique[i] = -1;
+    }
+    mb->mgPcgP = mb->mgPcgZ = mb->mgVcRhs = mb->mgVcSol = nil;
+    mb->mgPcgPartials = mb->mgPcgPartials2 = mb->mgPcgReduceCount = mb->mgPcgResult = nil;
+    mb->mgOmega = mb->mgPenaltyBuf = mb->mgScratchN = nil;
+    mb->mgAxpyOne = mb->mgAxpyZero = mb->mgPcgAlpha = mb->mgPcgNegAlpha = mb->mgPcgBeta = mb->mgPcgNegOne = nil;
+    mb->mgCachedNElem0 = -1;
+    mb->mgNumLevels = 0;
+}
+
+int FemPcgEnsureBuffers(MBContext* mb, int nElem, int ndof)
+{
+    if (mb->device == nil)
+        return -1;
+    if (nElem <= 0 || ndof <= 0)
+        return -1;
+    if (mb->femCachedNElem == nElem && mb->femCachedNDof == ndof)
+        return 0;
+
+    ReleaseFemPcgCache(mb);
+
+    NSUInteger dotTpg = 256u;
+    if (mb->pcgDotPartialPso != nil) {
+        const NSUInteger m = mb->pcgDotPartialPso.maxTotalThreadsPerThreadgroup;
+        if (m < dotTpg) {
+            dotTpg = 1u;
+            while (dotTpg * 2u <= m)
+                dotTpg <<= 1u;
+        }
+    }
+    mb->pcgDotTpg = dotTpg;
+
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+    const NSUInteger keLen = static_cast<NSUInteger>(nElem) * 576u * sizeof(float);
+    const NSUInteger dmLen = static_cast<NSUInteger>(nElem) * 24u * sizeof(int32_t);
+    const NSUInteger rhoLen = static_cast<NSUInteger>(nElem) * sizeof(float);
+    const NSUInteger dofF = static_cast<NSUInteger>(ndof) * sizeof(float);
+    const NSUInteger dofU = static_cast<NSUInteger>(ndof) * sizeof(uint32_t);
+
+    mb->femKe = [mb->device newBufferWithLength:keLen options:opts];
+    mb->femDofMap = [mb->device newBufferWithLength:dmLen options:opts];
+    mb->femRho = [mb->device newBufferWithLength:rhoLen options:opts];
+    mb->femV = [mb->device newBufferWithLength:dofF options:opts];
+    mb->femAv = [mb->device newBufferWithLength:dofU options:opts];
+    mb->femAvFloat = [mb->device newBufferWithLength:dofF options:opts];
+    mb->femFixedMask = [mb->device newBufferWithLength:static_cast<NSUInteger>(ndof) * sizeof(unsigned char) options:opts];
+    mb->femPenalty = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    mb->femNElem = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+    mb->femNDof = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+
+    mb->pcgU = [mb->device newBufferWithLength:dofF options:opts];
+    mb->pcgR = [mb->device newBufferWithLength:dofF options:opts];
+    mb->pcgZ = [mb->device newBufferWithLength:dofF options:opts];
+    mb->pcgP = [mb->device newBufferWithLength:dofF options:opts];
+    mb->pcgDiag = [mb->device newBufferWithLength:dofF options:opts];
+    mb->pcgF = [mb->device newBufferWithLength:dofF options:opts];
+
+    const int tpgI = static_cast<int>(mb->pcgDotTpg);
+    const int nPartCap = std::max(1, (ndof + tpgI - 1) / tpgI);
+    const NSUInteger partBytes = static_cast<NSUInteger>(nPartCap) * sizeof(float);
+    mb->pcgPartials = [mb->device newBufferWithLength:partBytes options:opts];
+    mb->pcgPartials2 = [mb->device newBufferWithLength:partBytes options:opts];
+
+    mb->pcgAlpha = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    mb->pcgBeta = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    mb->pcgNegAlpha = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    mb->pcgOne = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    mb->pcgNegOne = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    mb->pcgScalarOut = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    mb->pcgReduceCount = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+
+    if (mb->femKe == nil || mb->femDofMap == nil || mb->femRho == nil || mb->femV == nil || mb->femAv == nil
+        || mb->femAvFloat == nil || mb->femFixedMask == nil || mb->femPenalty == nil || mb->femNElem == nil
+        || mb->femNDof == nil || mb->pcgU == nil || mb->pcgR == nil || mb->pcgZ == nil || mb->pcgP == nil
+        || mb->pcgDiag == nil || mb->pcgF == nil || mb->pcgPartials == nil || mb->pcgPartials2 == nil
+        || mb->pcgAlpha == nil || mb->pcgBeta == nil || mb->pcgNegAlpha == nil || mb->pcgOne == nil
+        || mb->pcgNegOne == nil || mb->pcgScalarOut == nil || mb->pcgReduceCount == nil) {
+        ReleaseFemPcgCache(mb);
+        return -1;
+    }
+
+    *static_cast<float*>([mb->pcgOne contents]) = 1.f;
+    *static_cast<float*>([mb->pcgNegOne contents]) = -1.f;
+    mb->femCachedNElem = nElem;
+    mb->femCachedNDof = ndof;
+    return 0;
 }
 
 NSString* MetallibPathBesideDylib()
@@ -182,10 +403,33 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> zvb = MakePso(device, library, @"zero_voxel_boundary", &err);
         id<MTLComputePipelineState> lapC = MakePso(device, library, @"laplacianConstrainedKernel", &err);
         id<MTLComputePipelineState> fmv = MakePso(device, library, @"fem_matvec", &err);
+        id<MTLComputePipelineState> fmfp = MakePso(device, library, @"fem_apply_fixed_penalty", &err);
+        id<MTLComputePipelineState> pcgAx = MakePso(device, library, @"pcg_axpy", &err);
+        id<MTLComputePipelineState> pcgPc = MakePso(device, library, @"pcg_precond", &err);
+        id<MTLComputePipelineState> pcgDp = MakePso(device, library, @"pcg_dot_partial", &err);
+        id<MTLComputePipelineState> pcgRl = MakePso(device, library, @"pcg_reduce_level", &err);
+        id<MTLComputePipelineState> pcgRd = MakePso(device, library, @"pcg_reduce", &err);
+        id<MTLComputePipelineState> pcgCp = MakePso(device, library, @"pcg_copy", &err);
+        id<MTLComputePipelineState> pcgU2f = MakePso(device, library, @"pcg_uint_to_float", &err);
         id<MTLComputePipelineState> vsmp = MakePso(device, library, @"voxel_sample_kernel", &err);
         id<MTLComputePipelineState> prxb = MakePso(device, library, @"proximity_blend_kernel", &err);
+        id<MTLComputePipelineState> fmu = MakePso(device, library, @"fem_matvec_unique", &err);
+        id<MTLComputePipelineState> mgJ = MakePso(device, library, @"mg_jacobi_update", &err);
+        id<MTLComputePipelineState> mgRes = MakePso(device, library, @"mg_residual", &err);
+        id<MTLComputePipelineState> mgRest = MakePso(device, library, @"mg_restrict", &err);
+        id<MTLComputePipelineState> mgProl = MakePso(device, library, @"mg_prolongate", &err);
+        id<MTLComputePipelineState> mgZ = MakePso(device, library, @"mg_zero", &err);
+        id<MTLComputePipelineState> mgZu = MakePso(device, library, @"mg_zero_uint", &err);
+        id<MTLComputePipelineState> mgAxpy = MakePso(device, library, @"pcg_axpy_mg", &err);
+        id<MTLComputePipelineState> mgPc = MakePso(device, library, @"pcg_precond_mg", &err);
+        id<MTLComputePipelineState> mgDp = MakePso(device, library, @"mg_pcg_dot_partial", &err);
+        id<MTLComputePipelineState> mgRl = MakePso(device, library, @"mg_pcg_reduce_level", &err);
+        id<MTLComputePipelineState> mgRd = MakePso(device, library, @"mg_pcg_reduce", &err);
         if (bench == nil || lap == nil || cls == nil || cld == nil || edg == nil || jfaI == nil || jfaS == nil || jfaE == nil
-            || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil || lapC == nil || fmv == nil || vsmp == nil || prxb == nil)
+            || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil || lapC == nil || fmv == nil || fmfp == nil || pcgAx == nil
+            || pcgPc == nil || pcgDp == nil || pcgRl == nil || pcgRd == nil || pcgCp == nil || pcgU2f == nil || vsmp == nil
+            || prxb == nil || fmu == nil || mgJ == nil || mgRes == nil || mgRest == nil || mgProl == nil || mgZ == nil
+            || mgZu == nil || mgAxpy == nil || mgPc == nil || mgDp == nil || mgRl == nil || mgRd == nil)
             return -5;
 
         id<MTLCommandQueue> queue = [device newCommandQueue];
@@ -193,6 +437,12 @@ int mb_create_context(void** outCtx)
             return -7;
 
         auto* ctx = new MBContext();
+        for (int mi = 0; mi < MB_MG_MAX_LEVELS; mi++) {
+            ctx->mgKeUnique[mi] = ctx->mgKeIdx[mi] = ctx->mgDofMap[mi] = ctx->mgDiag[mi] = ctx->mgFixed[mi] = nil;
+            ctx->mgProlong[mi] = ctx->mgProlongW[mi] = ctx->mgNElemBuf[mi] = ctx->mgNDofBuf[mi] = ctx->mgNumUniqBuf[mi] = nil;
+            ctx->mgX[mi] = ctx->mgB[mi] = ctx->mgR[mi] = ctx->mgAx[mi] = ctx->mgRho[mi] = nil;
+            ctx->mgCachedNElem[mi] = ctx->mgCachedNDof[mi] = ctx->mgCachedNumUnique[mi] = -1;
+        }
         ctx->device = device;
         ctx->queue = queue;
         ctx->benchmarkPso = bench;
@@ -209,8 +459,28 @@ int mb_create_context(void** outCtx)
         ctx->zeroVoxelBoundaryPso = zvb;
         ctx->laplacianConstrainedPso = lapC;
         ctx->femMatVecPso = fmv;
+        ctx->femFixedPenaltyPso = fmfp;
+        ctx->pcgAxpyPso = pcgAx;
+        ctx->pcgPrecondPso = pcgPc;
+        ctx->pcgDotPartialPso = pcgDp;
+        ctx->pcgReduceLevelPso = pcgRl;
+        ctx->pcgReducePso = pcgRd;
+        ctx->pcgCopyPso = pcgCp;
+        ctx->pcgUintToFloatPso = pcgU2f;
         ctx->voxelSamplePso = vsmp;
         ctx->proximityBlendPso = prxb;
+        ctx->femMatVecUniquePso = fmu;
+        ctx->mgJacobiPso = mgJ;
+        ctx->mgResidualPso = mgRes;
+        ctx->mgRestrictPso = mgRest;
+        ctx->mgProlongatePso = mgProl;
+        ctx->mgZeroPso = mgZ;
+        ctx->mgZeroUintPso = mgZu;
+        ctx->mgPcgAxpyPso = mgAxpy;
+        ctx->mgPcgPrecondPso = mgPc;
+        ctx->mgPcgDotPartialPso = mgDp;
+        ctx->mgPcgReduceLevelPso = mgRl;
+        ctx->mgPcgReducePso = mgRd;
         *outCtx = ctx;
         return 0;
     }
@@ -235,8 +505,30 @@ void mb_destroy_context(void* ctx)
     mb->zeroVoxelBoundaryPso = nil;
     mb->laplacianConstrainedPso = nil;
     mb->femMatVecPso = nil;
+    mb->femFixedPenaltyPso = nil;
+    mb->pcgAxpyPso = nil;
+    mb->pcgPrecondPso = nil;
+    mb->pcgDotPartialPso = nil;
+    mb->pcgReduceLevelPso = nil;
+    mb->pcgReducePso = nil;
+    mb->pcgCopyPso = nil;
+    mb->pcgUintToFloatPso = nil;
     mb->voxelSamplePso = nil;
     mb->proximityBlendPso = nil;
+    mb->femMatVecUniquePso = nil;
+    mb->mgJacobiPso = nil;
+    mb->mgResidualPso = nil;
+    mb->mgRestrictPso = nil;
+    mb->mgProlongatePso = nil;
+    mb->mgZeroPso = nil;
+    mb->mgZeroUintPso = nil;
+    mb->mgPcgAxpyPso = nil;
+    mb->mgPcgPrecondPso = nil;
+    mb->mgPcgDotPartialPso = nil;
+    mb->mgPcgReduceLevelPso = nil;
+    mb->mgPcgReducePso = nil;
+    ReleaseFmuCache(mb);
+    ReleaseMgHierarchy(mb);
     mb->lapBxIn = mb->lapByIn = mb->lapBzIn = nil;
     mb->lapBxOut = mb->lapByOut = mb->lapBzOut = nil;
     mb->lapAdj = mb->lapOff = mb->lapVc = mb->lapStr = nil;
@@ -244,6 +536,7 @@ void mb_destroy_context(void* ctx)
     ReleaseCpMeshCache(mb);
     ReleaseCpCloudCache(mb);
     ReleaseJfaCache(mb);
+    ReleaseFemPcgCache(mb);
     mb->queue = nil;
     mb->device = nil;
     delete mb;
@@ -1030,6 +1323,435 @@ NSUInteger MbThreadsPerThreadgroup1D(id<MTLComputePipelineState> pso)
     return MIN(tw, cap);
 }
 
+/// Encode dot(x,y) for length @p ndof (partials + hierarchical sum). After commit/wait, read with @ref MbReadDotScalarAfterWait.
+static void MbEncodeDotXY(MBContext* mb, id<MTLComputeCommandEncoder> enc, id<MTLBuffer> x, id<MTLBuffer> y, int ndof)
+{
+    const NSUInteger kTpg = mb->pcgDotTpg;
+    *static_cast<int32_t*>([mb->femNDof contents]) = static_cast<int32_t>(ndof);
+
+    [enc setComputePipelineState:mb->pcgDotPartialPso];
+    [enc setBuffer:x offset:0 atIndex:0];
+    [enc setBuffer:y offset:0 atIndex:1];
+    [enc setBuffer:mb->pcgPartials offset:0 atIndex:2];
+    [enc setBuffer:mb->femNDof offset:0 atIndex:3];
+    const NSUInteger nGrp = (static_cast<NSUInteger>(ndof) + kTpg - 1u) / kTpg;
+    [enc dispatchThreads:MTLSizeMake(nGrp * kTpg, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
+
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    id<MTLBuffer> curIn = mb->pcgPartials;
+    id<MTLBuffer> curOut = mb->pcgPartials2;
+    int nCur = static_cast<int>(nGrp);
+
+    [enc setComputePipelineState:mb->pcgReduceLevelPso];
+    while (nCur > 1) {
+        *static_cast<int32_t*>([mb->pcgReduceCount contents]) = static_cast<int32_t>(nCur);
+        [enc setBuffer:curIn offset:0 atIndex:0];
+        [enc setBuffer:curOut offset:0 atIndex:1];
+        [enc setBuffer:mb->pcgReduceCount offset:0 atIndex:2];
+        const NSUInteger nOut = (static_cast<NSUInteger>(nCur) + kTpg - 1u) / kTpg;
+        [enc dispatchThreads:MTLSizeMake(nOut * kTpg, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        nCur = static_cast<int>(nOut);
+        id<MTLBuffer> t = curIn;
+        curIn = curOut;
+        curOut = t;
+    }
+}
+
+static float MbReadDotScalarAfterWait(MBContext* mb, int ndof)
+{
+    const NSUInteger kTpg = mb->pcgDotTpg;
+    const NSUInteger nGrp = (static_cast<NSUInteger>(ndof) + kTpg - 1u) / kTpg;
+    if (nGrp <= 1u)
+        return static_cast<const float*>([mb->pcgPartials contents])[0];
+    id<MTLBuffer> curIn = mb->pcgPartials;
+    id<MTLBuffer> curOut = mb->pcgPartials2;
+    int nCur = static_cast<int>(nGrp);
+    while (nCur > 1) {
+        const NSUInteger nOut = (static_cast<NSUInteger>(nCur) + kTpg - 1u) / kTpg;
+        nCur = static_cast<int>(nOut);
+        id<MTLBuffer> t = curIn;
+        curIn = curOut;
+        curOut = t;
+    }
+    return static_cast<const float*>([curIn contents])[0];
+}
+
+static void MbFemEncodeMatvecPenaltyUintToFloat(MBContext* mb, id<MTLComputeCommandEncoder> enc, id<MTLBuffer> vBuf)
+{
+    memset([mb->femAv contents], 0, static_cast<size_t>(mb->femCachedNDof) * sizeof(uint32_t));
+
+    [enc setComputePipelineState:mb->femMatVecPso];
+    [enc setBuffer:mb->femKe offset:0 atIndex:0];
+    [enc setBuffer:mb->femDofMap offset:0 atIndex:1];
+    [enc setBuffer:mb->femRho offset:0 atIndex:2];
+    [enc setBuffer:vBuf offset:0 atIndex:3];
+    [enc setBuffer:mb->femAv offset:0 atIndex:4];
+    [enc setBuffer:mb->femNElem offset:0 atIndex:5];
+    NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->femMatVecPso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(mb->femCachedNElem), 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    [enc setComputePipelineState:mb->femFixedPenaltyPso];
+    [enc setBuffer:mb->femAv offset:0 atIndex:0];
+    [enc setBuffer:mb->femFixedMask offset:0 atIndex:1];
+    [enc setBuffer:vBuf offset:0 atIndex:2];
+    [enc setBuffer:mb->femPenalty offset:0 atIndex:3];
+    [enc setBuffer:mb->femNDof offset:0 atIndex:4];
+    tpg = MbThreadsPerThreadgroup1D(mb->femFixedPenaltyPso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(mb->femCachedNDof), 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    [enc setComputePipelineState:mb->pcgUintToFloatPso];
+    [enc setBuffer:mb->femAv offset:0 atIndex:0];
+    [enc setBuffer:mb->femAvFloat offset:0 atIndex:1];
+    [enc setBuffer:mb->femNDof offset:0 atIndex:2];
+    tpg = MbThreadsPerThreadgroup1D(mb->pcgUintToFloatPso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(mb->femCachedNDof), 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+}
+
+static void MbEncodeAxpy(
+    MBContext* mb,
+    id<MTLComputeCommandEncoder> enc,
+    id<MTLBuffer> out,
+    id<MTLBuffer> x,
+    id<MTLBuffer> y,
+    id<MTLBuffer> aBuf,
+    id<MTLBuffer> bBuf,
+    int ndof)
+{
+    *static_cast<int32_t*>([mb->femNDof contents]) = static_cast<int32_t>(ndof);
+    [enc setComputePipelineState:mb->pcgAxpyPso];
+    [enc setBuffer:out offset:0 atIndex:0];
+    [enc setBuffer:x offset:0 atIndex:1];
+    [enc setBuffer:y offset:0 atIndex:2];
+    [enc setBuffer:aBuf offset:0 atIndex:3];
+    [enc setBuffer:bBuf offset:0 atIndex:4];
+    [enc setBuffer:mb->femNDof offset:0 atIndex:5];
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->pcgAxpyPso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof), 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+}
+
+static int MgCmdWait(id<MTLCommandBuffer> cmd)
+{
+    if (cmd == nil)
+        return -99;
+    [cmd waitUntilCompleted];
+    return (cmd.status == MTLCommandBufferStatusError) ? -99 : 0;
+}
+
+static void MgMatVecUniquePenalty(MBContext* mb, id<MTLComputeCommandEncoder> enc, int lev, id<MTLBuffer> vBuf, id<MTLBuffer> axAtomic)
+{
+    const int nd = mb->mgCachedNDof[lev];
+    const int ne = mb->mgCachedNElem[lev];
+
+    [enc setComputePipelineState:mb->mgZeroUintPso];
+    [enc setBuffer:axAtomic offset:0 atIndex:0];
+    [enc setBuffer:mb->mgNDofBuf[lev] offset:0 atIndex:1];
+    NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgZeroUintPso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nd), 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    [enc setComputePipelineState:mb->femMatVecUniquePso];
+    [enc setBuffer:mb->mgKeUnique[lev] offset:0 atIndex:0];
+    [enc setBuffer:mb->mgKeIdx[lev] offset:0 atIndex:1];
+    [enc setBuffer:mb->mgDofMap[lev] offset:0 atIndex:2];
+    [enc setBuffer:mb->mgRho[lev] offset:0 atIndex:3];
+    [enc setBuffer:vBuf offset:0 atIndex:4];
+    [enc setBuffer:axAtomic offset:0 atIndex:5];
+    [enc setBuffer:mb->mgNElemBuf[lev] offset:0 atIndex:6];
+    tpg = MbThreadsPerThreadgroup1D(mb->femMatVecUniquePso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ne), 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    [enc setComputePipelineState:mb->femFixedPenaltyPso];
+    [enc setBuffer:axAtomic offset:0 atIndex:0];
+    [enc setBuffer:mb->mgFixed[lev] offset:0 atIndex:1];
+    [enc setBuffer:vBuf offset:0 atIndex:2];
+    [enc setBuffer:mb->mgPenaltyBuf offset:0 atIndex:3];
+    [enc setBuffer:mb->mgNDofBuf[lev] offset:0 atIndex:4];
+    tpg = MbThreadsPerThreadgroup1D(mb->femFixedPenaltyPso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nd), 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+}
+
+static void MgEncodeDotMG(MBContext* mb, id<MTLComputeCommandEncoder> enc, id<MTLBuffer> x, id<MTLBuffer> y, int n)
+{
+    const NSUInteger kTpg = mb->mgDotTpg;
+    *static_cast<int32_t*>([mb->mgScratchN contents]) = static_cast<int32_t>(n);
+    [enc setThreadgroupMemoryLength:kTpg * sizeof(float) atIndex:0];
+    [enc setComputePipelineState:mb->mgPcgDotPartialPso];
+    [enc setBuffer:x offset:0 atIndex:0];
+    [enc setBuffer:y offset:0 atIndex:1];
+    [enc setBuffer:mb->mgPcgPartials offset:0 atIndex:2];
+    [enc setBuffer:mb->mgScratchN offset:0 atIndex:3];
+    const NSUInteger nGrp = (static_cast<NSUInteger>(n) + kTpg - 1u) / kTpg;
+    [enc dispatchThreads:MTLSizeMake(nGrp * kTpg, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
+
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    id<MTLBuffer> curIn = mb->mgPcgPartials;
+    id<MTLBuffer> curOut = mb->mgPcgPartials2;
+    int nCur = static_cast<int>(nGrp);
+
+    [enc setThreadgroupMemoryLength:kTpg * sizeof(float) atIndex:0];
+    [enc setComputePipelineState:mb->mgPcgReduceLevelPso];
+    while (nCur > 1) {
+        *static_cast<int32_t*>([mb->mgPcgReduceCount contents]) = static_cast<int32_t>(nCur);
+        [enc setBuffer:curIn offset:0 atIndex:0];
+        [enc setBuffer:curOut offset:0 atIndex:1];
+        [enc setBuffer:mb->mgPcgReduceCount offset:0 atIndex:2];
+        const NSUInteger nOut = (static_cast<NSUInteger>(nCur) + kTpg - 1u) / kTpg;
+        [enc dispatchThreads:MTLSizeMake(nOut * kTpg, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        nCur = static_cast<int>(nOut);
+        id<MTLBuffer> t = curIn;
+        curIn = curOut;
+        curOut = t;
+    }
+}
+
+static float MgReadDotScalarMG(MBContext* mb, int n)
+{
+    const NSUInteger kTpg = mb->mgDotTpg;
+    const NSUInteger nGrp = (static_cast<NSUInteger>(n) + kTpg - 1u) / kTpg;
+    if (nGrp <= 1u)
+        return static_cast<const float*>([mb->mgPcgPartials contents])[0];
+    id<MTLBuffer> curIn = mb->mgPcgPartials;
+    id<MTLBuffer> curOut = mb->mgPcgPartials2;
+    int nCur = static_cast<int>(nGrp);
+    while (nCur > 1) {
+        const NSUInteger nOut = (static_cast<NSUInteger>(nCur) + kTpg - 1u) / kTpg;
+        nCur = static_cast<int>(nOut);
+        id<MTLBuffer> t = curIn;
+        curIn = curOut;
+        curOut = t;
+    }
+    return static_cast<const float*>([curIn contents])[0];
+}
+
+static int MgDotGpu(MBContext* mb, id<MTLBuffer> x, id<MTLBuffer> y, int n, float* outVal)
+{
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -99;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -99;
+        MgEncodeDotMG(mb, enc, x, y, n);
+        [enc endEncoding];
+        [cmd commit];
+        const int w = MgCmdWait(cmd);
+        if (w != 0)
+            return w;
+        *outVal = MgReadDotScalarMG(mb, n);
+    }
+    return 0;
+}
+
+static void MgEncodeAxpyMg(
+    MBContext* mb,
+    id<MTLComputeCommandEncoder> enc,
+    id<MTLBuffer> out,
+    id<MTLBuffer> x,
+    id<MTLBuffer> y,
+    id<MTLBuffer> aBuf,
+    id<MTLBuffer> bBuf,
+    int ndof)
+{
+    *static_cast<int32_t*>([mb->mgScratchN contents]) = static_cast<int32_t>(ndof);
+    [enc setComputePipelineState:mb->mgPcgAxpyPso];
+    [enc setBuffer:out offset:0 atIndex:0];
+    [enc setBuffer:x offset:0 atIndex:1];
+    [enc setBuffer:y offset:0 atIndex:2];
+    [enc setBuffer:aBuf offset:0 atIndex:3];
+    [enc setBuffer:bBuf offset:0 atIndex:4];
+    [enc setBuffer:mb->mgScratchN offset:0 atIndex:5];
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgPcgAxpyPso);
+    [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof), 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+}
+
+static int VCycleMB(
+    MBContext* mb,
+    int level,
+    int numLevels,
+    int nSmooth,
+    id<MTLBuffer> b0_override,
+    id<MTLBuffer> x0_override)
+{
+    const int nDofL = mb->mgCachedNDof[level];
+    const int nElemL = mb->mgCachedNElem[level];
+    (void)nElemL;
+    id<MTLBuffer> bUse = (level == 0 && b0_override != nil) ? b0_override : mb->mgB[level];
+    id<MTLBuffer> xUse = (level == 0 && x0_override != nil) ? x0_override : mb->mgX[level];
+
+    auto runMatJac = [&]() -> int {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            MgMatVecUniquePenalty(mb, enc, level, xUse, mb->mgAx[level]);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setComputePipelineState:mb->mgJacobiPso];
+            [enc setBuffer:xUse offset:0 atIndex:0];
+            [enc setBuffer:bUse offset:0 atIndex:1];
+            [enc setBuffer:mb->mgAx[level] offset:0 atIndex:2];
+            [enc setBuffer:mb->mgDiag[level] offset:0 atIndex:3];
+            [enc setBuffer:mb->mgOmega offset:0 atIndex:4];
+            [enc setBuffer:mb->mgNDofBuf[level] offset:0 atIndex:5];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgJacobiPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nDofL), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            return MgCmdWait(cmd);
+        }
+    };
+
+    for (int s = 0; s < nSmooth; s++) {
+        const int e = runMatJac();
+        if (e != 0)
+            return e;
+    }
+
+    if (level == numLevels - 1) {
+        for (int s = 0; s < 40; s++) {
+            const int e = runMatJac();
+            if (e != 0)
+                return e;
+        }
+        return 0;
+    }
+
+    {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            MgMatVecUniquePenalty(mb, enc, level, xUse, mb->mgAx[level]);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setComputePipelineState:mb->mgResidualPso];
+            [enc setBuffer:mb->mgR[level] offset:0 atIndex:0];
+            [enc setBuffer:bUse offset:0 atIndex:1];
+            [enc setBuffer:mb->mgAx[level] offset:0 atIndex:2];
+            [enc setBuffer:mb->mgNDofBuf[level] offset:0 atIndex:3];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgResidualPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nDofL), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            const int w = MgCmdWait(cmd);
+            if (w != 0)
+                return w;
+        }
+    }
+
+    const int nDofC = mb->mgCachedNDof[level + 1];
+    {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            [enc setComputePipelineState:mb->mgZeroUintPso];
+            [enc setBuffer:mb->mgB[level + 1] offset:0 atIndex:0];
+            [enc setBuffer:mb->mgNDofBuf[level + 1] offset:0 atIndex:1];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgZeroUintPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nDofC), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setComputePipelineState:mb->mgRestrictPso];
+            [enc setBuffer:mb->mgR[level] offset:0 atIndex:0];
+            [enc setBuffer:mb->mgB[level + 1] offset:0 atIndex:1];
+            [enc setBuffer:mb->mgProlong[level + 1] offset:0 atIndex:2];
+            [enc setBuffer:mb->mgProlongW[level + 1] offset:0 atIndex:3];
+            [enc setBuffer:mb->mgNDofBuf[level] offset:0 atIndex:4];
+            tpg = MbThreadsPerThreadgroup1D(mb->mgRestrictPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nDofL), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            const int w = MgCmdWait(cmd);
+            if (w != 0)
+                return w;
+        }
+    }
+
+    {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            [enc setComputePipelineState:mb->mgZeroPso];
+            [enc setBuffer:mb->mgX[level + 1] offset:0 atIndex:0];
+            [enc setBuffer:mb->mgNDofBuf[level + 1] offset:0 atIndex:1];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgZeroPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nDofC), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            const int w = MgCmdWait(cmd);
+            if (w != 0)
+                return w;
+        }
+    }
+
+    const int er = VCycleMB(mb, level + 1, numLevels, nSmooth, nil, nil);
+    if (er != 0)
+        return er;
+
+    {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            [enc setComputePipelineState:mb->mgProlongatePso];
+            [enc setBuffer:xUse offset:0 atIndex:0];
+            [enc setBuffer:mb->mgX[level + 1] offset:0 atIndex:1];
+            [enc setBuffer:mb->mgProlong[level + 1] offset:0 atIndex:2];
+            [enc setBuffer:mb->mgProlongW[level + 1] offset:0 atIndex:3];
+            [enc setBuffer:mb->mgNDofBuf[level] offset:0 atIndex:4];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgProlongatePso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nDofL), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            const int w = MgCmdWait(cmd);
+            if (w != 0)
+                return w;
+        }
+    }
+
+    for (int s = 0; s < nSmooth; s++) {
+        const int e = runMatJac();
+        if (e != 0)
+            return e;
+    }
+    return 0;
+}
+
 } // namespace
 
 extern "C" {
@@ -1412,6 +2134,8 @@ int mb_fem_matvec(
     const float* rho,
     const float* v_in,
     float* Av_out,
+    const unsigned char* fixedMask,
+    float penalty,
     int nElem,
     int ndof)
 {
@@ -1431,6 +2155,7 @@ int mb_fem_matvec(
     const NSUInteger dofBytes = static_cast<NSUInteger>(ndof) * sizeof(float);
     const NSUInteger avUIntBytes = static_cast<NSUInteger>(ndof) * sizeof(uint32_t);
     const NSUInteger nElemSize = sizeof(int);
+    const NSUInteger ndofSize = sizeof(int);
 
     id<MTLBuffer> bKe = [mb->device newBufferWithBytes:Ke_flat length:keBytes options:opts];
     id<MTLBuffer> bDof = [mb->device newBufferWithBytes:dofMap length:dmBytes options:opts];
@@ -1439,7 +2164,18 @@ int mb_fem_matvec(
     id<MTLBuffer> bAv = [mb->device newBufferWithLength:avUIntBytes options:opts];
     id<MTLBuffer> bN = [mb->device newBufferWithBytes:&nElem length:nElemSize options:opts];
 
+    id<MTLBuffer> bFix = nil;
+    id<MTLBuffer> bPen = nil;
+    id<MTLBuffer> bNDof = nil;
+    if (fixedMask != nullptr && mb->femFixedPenaltyPso != nil) {
+        bFix = [mb->device newBufferWithBytes:fixedMask length:static_cast<NSUInteger>(ndof) * sizeof(unsigned char) options:opts];
+        bPen = [mb->device newBufferWithBytes:&penalty length:sizeof(float) options:opts];
+        bNDof = [mb->device newBufferWithBytes:&ndof length:ndofSize options:opts];
+    }
+
     if (bKe == nil || bDof == nil || bRho == nil || bV == nil || bAv == nil || bN == nil)
+        return -1;
+    if (fixedMask != nullptr && (bFix == nil || bPen == nil || bNDof == nil))
         return -1;
 
     memset([bAv contents], 0, avUIntBytes);
@@ -1464,6 +2200,20 @@ int mb_fem_matvec(
         [enc setBuffer:bN offset:0 atIndex:5];
         [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nElem), 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+        if (fixedMask != nullptr && mb->femFixedPenaltyPso != nil) {
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setComputePipelineState:mb->femFixedPenaltyPso];
+            [enc setBuffer:bAv offset:0 atIndex:0];
+            [enc setBuffer:bFix offset:0 atIndex:1];
+            [enc setBuffer:bV offset:0 atIndex:2];
+            [enc setBuffer:bPen offset:0 atIndex:3];
+            [enc setBuffer:bNDof offset:0 atIndex:4];
+            const NSUInteger tpgP = MbThreadsPerThreadgroup1D(mb->femFixedPenaltyPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpgP, 1, 1)];
+        }
+
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
@@ -1476,6 +2226,691 @@ int mb_fem_matvec(
         std::memcpy(&f, &u, sizeof(float));
         Av_out[i] = f;
     }
+    return 0;
+}
+
+int mb_fem_pcg_solve(
+    void* ctx,
+    const float* Ke_flat,
+    const int* dofMap,
+    const unsigned char* fixedMask,
+    const float* rho,
+    const float* diag,
+    const float* f_rhs,
+    float* u_inout,
+    float penalty,
+    int nElem,
+    int ndof,
+    int maxIter,
+    float tolRel)
+{
+    if (ctx == nullptr || Ke_flat == nullptr || dofMap == nullptr || fixedMask == nullptr || rho == nullptr
+        || diag == nullptr || f_rhs == nullptr || u_inout == nullptr)
+        return -1;
+    if (nElem <= 0 || ndof <= 0 || maxIter <= 0)
+        return -1;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->femMatVecPso == nil || mb->femFixedPenaltyPso == nil || mb->pcgAxpyPso == nil
+        || mb->pcgPrecondPso == nil || mb->pcgDotPartialPso == nil || mb->pcgReduceLevelPso == nil
+        || mb->pcgCopyPso == nil || mb->pcgUintToFloatPso == nil)
+        return -1;
+
+    const bool rebindMesh = mb->femCachedNElem != nElem || mb->femCachedNDof != ndof;
+    if (FemPcgEnsureBuffers(mb, nElem, ndof) != 0)
+        return -1;
+
+    const size_t keBytes = static_cast<size_t>(nElem) * 576u * sizeof(float);
+    const size_t dmBytes = static_cast<size_t>(nElem) * 24u * sizeof(int32_t);
+    const size_t dofBytes = static_cast<size_t>(ndof) * sizeof(float);
+
+    if (rebindMesh) {
+        memcpy([mb->femKe contents], Ke_flat, keBytes);
+        memcpy([mb->femDofMap contents], dofMap, dmBytes);
+        memcpy([mb->femFixedMask contents], fixedMask, static_cast<size_t>(ndof) * sizeof(unsigned char));
+    }
+    *static_cast<float*>([mb->femPenalty contents]) = penalty;
+    *static_cast<int32_t*>([mb->femNElem contents]) = static_cast<int32_t>(nElem);
+    *static_cast<int32_t*>([mb->femNDof contents]) = static_cast<int32_t>(ndof);
+
+    memcpy([mb->femRho contents], rho, static_cast<size_t>(nElem) * sizeof(float));
+    memcpy([mb->pcgDiag contents], diag, dofBytes);
+    memcpy([mb->pcgF contents], f_rhs, dofBytes);
+    memcpy([mb->pcgU contents], u_inout, dofBytes);
+
+    float normB = 1.f;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -1;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -1;
+
+        MbFemEncodeMatvecPenaltyUintToFloat(mb, enc, mb->pcgU);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        MbEncodeAxpy(mb, enc, mb->pcgR, mb->pcgF, mb->femAvFloat, mb->pcgOne, mb->pcgNegOne, ndof);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        MbEncodeDotXY(mb, enc, mb->pcgF, mb->pcgF, ndof);
+
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    {
+        const float ff = MbReadDotScalarAfterWait(mb, ndof);
+        normB = std::sqrt(std::max(ff, 0.f));
+        if (normB < 1e-30f)
+            normB = 1.f;
+    }
+
+    float rzOld = 0.f;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -1;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -1;
+
+        *static_cast<int32_t*>([mb->femNDof contents]) = static_cast<int32_t>(ndof);
+        [enc setComputePipelineState:mb->pcgPrecondPso];
+        [enc setBuffer:mb->pcgZ offset:0 atIndex:0];
+        [enc setBuffer:mb->pcgR offset:0 atIndex:1];
+        [enc setBuffer:mb->pcgDiag offset:0 atIndex:2];
+        [enc setBuffer:mb->femNDof offset:0 atIndex:3];
+        NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->pcgPrecondPso);
+        [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof), 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        [enc setComputePipelineState:mb->pcgCopyPso];
+        [enc setBuffer:mb->pcgP offset:0 atIndex:0];
+        [enc setBuffer:mb->pcgZ offset:0 atIndex:1];
+        [enc setBuffer:mb->femNDof offset:0 atIndex:2];
+        tpg = MbThreadsPerThreadgroup1D(mb->pcgCopyPso);
+        [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof), 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        MbEncodeDotXY(mb, enc, mb->pcgR, mb->pcgZ, ndof);
+
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    rzOld = MbReadDotScalarAfterWait(mb, ndof);
+
+    float betaGpu = 0.f;
+
+    for (int it = 0; it < maxIter; ++it) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -1;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -1;
+
+            if (it > 0) {
+                *static_cast<float*>([mb->pcgBeta contents]) = betaGpu;
+                MbEncodeAxpy(mb, enc, mb->pcgP, mb->pcgZ, mb->pcgP, mb->pcgOne, mb->pcgBeta, ndof);
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+
+            MbFemEncodeMatvecPenaltyUintToFloat(mb, enc, mb->pcgP);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            MbEncodeDotXY(mb, enc, mb->pcgP, mb->femAvFloat, ndof);
+
+            [enc endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+        }
+
+        const float denom = MbReadDotScalarAfterWait(mb, ndof);
+        if (std::fabs(denom) < 1e-40f)
+            break;
+
+        const float alpha = rzOld / denom;
+        *static_cast<float*>([mb->pcgAlpha contents]) = alpha;
+        *static_cast<float*>([mb->pcgNegAlpha contents]) = -alpha;
+
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -1;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -1;
+
+            MbEncodeAxpy(mb, enc, mb->pcgU, mb->pcgU, mb->pcgP, mb->pcgOne, mb->pcgAlpha, ndof);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            MbEncodeAxpy(mb, enc, mb->pcgR, mb->pcgR, mb->femAvFloat, mb->pcgOne, mb->pcgNegAlpha, ndof);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            MbEncodeDotXY(mb, enc, mb->pcgR, mb->pcgR, ndof);
+
+            [enc endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+        }
+
+        const float nr2 = MbReadDotScalarAfterWait(mb, ndof);
+        if (std::sqrt(std::max(nr2, 0.f)) < tolRel * normB)
+            break;
+
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -1;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -1;
+
+            *static_cast<int32_t*>([mb->femNDof contents]) = static_cast<int32_t>(ndof);
+            [enc setComputePipelineState:mb->pcgPrecondPso];
+            [enc setBuffer:mb->pcgZ offset:0 atIndex:0];
+            [enc setBuffer:mb->pcgR offset:0 atIndex:1];
+            [enc setBuffer:mb->pcgDiag offset:0 atIndex:2];
+            [enc setBuffer:mb->femNDof offset:0 atIndex:3];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->pcgPrecondPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            MbEncodeDotXY(mb, enc, mb->pcgR, mb->pcgZ, ndof);
+
+            [enc endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+        }
+
+        const float rzNew = MbReadDotScalarAfterWait(mb, ndof);
+        betaGpu = rzNew / (rzOld + 1e-40f);
+        rzOld = rzNew;
+    }
+
+    memcpy(u_inout, [mb->pcgU contents], dofBytes);
+    return 0;
+}
+
+int mb_fem_matvec_unique(
+    void* ctx,
+    const float* Ke_unique,
+    const int* keIdx,
+    const int* dofMap,
+    const float* rho,
+    const float* v_in,
+    float* Av_out,
+    int numUnique,
+    int nElem,
+    int ndof)
+{
+    if (ctx == nullptr || Ke_unique == nullptr || keIdx == nullptr || dofMap == nullptr || rho == nullptr
+        || v_in == nullptr || Av_out == nullptr)
+        return -1;
+    if (numUnique <= 0 || nElem <= 0 || ndof <= 0)
+        return -1;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->femMatVecUniquePso == nil)
+        return -1;
+
+    if (mb->fmuCachedNElem != nElem || mb->fmuCachedNumUniq != numUnique) {
+        ReleaseFmuCache(mb);
+        MTLResourceOptions opts = MTLResourceStorageModeShared;
+        const NSUInteger keB = static_cast<NSUInteger>(numUnique) * 576u * sizeof(float);
+        const NSUInteger idxB = static_cast<NSUInteger>(nElem) * sizeof(int32_t);
+        const NSUInteger dmB = static_cast<NSUInteger>(nElem) * 24u * sizeof(int32_t);
+        const NSUInteger rhoB = static_cast<NSUInteger>(nElem) * sizeof(float);
+        const NSUInteger vB = static_cast<NSUInteger>(ndof) * sizeof(float);
+        const NSUInteger avB = static_cast<NSUInteger>(ndof) * sizeof(uint32_t);
+
+        mb->fmuKe = [mb->device newBufferWithLength:keB options:opts];
+        mb->fmuKeIdx = [mb->device newBufferWithLength:idxB options:opts];
+        mb->fmuDofMap = [mb->device newBufferWithLength:dmB options:opts];
+        mb->fmuRho = [mb->device newBufferWithLength:rhoB options:opts];
+        mb->fmuV = [mb->device newBufferWithLength:vB options:opts];
+        mb->fmuAv = [mb->device newBufferWithLength:avB options:opts];
+        mb->fmuNElem = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+
+        if (mb->fmuKe == nil || mb->fmuKeIdx == nil || mb->fmuDofMap == nil || mb->fmuRho == nil || mb->fmuV == nil
+            || mb->fmuAv == nil || mb->fmuNElem == nil) {
+            ReleaseFmuCache(mb);
+            return -1;
+        }
+        memcpy([mb->fmuKe contents], Ke_unique, static_cast<size_t>(keB));
+        memcpy([mb->fmuKeIdx contents], keIdx, static_cast<size_t>(idxB));
+        memcpy([mb->fmuDofMap contents], dofMap, static_cast<size_t>(dmB));
+        mb->fmuCachedNElem = nElem;
+        mb->fmuCachedNumUniq = numUnique;
+    } else {
+        memcpy([mb->fmuKe contents], Ke_unique, static_cast<size_t>(numUnique) * 576u * sizeof(float));
+        memcpy([mb->fmuKeIdx contents], keIdx, static_cast<size_t>(nElem) * sizeof(int32_t));
+        memcpy([mb->fmuDofMap contents], dofMap, static_cast<size_t>(nElem) * 24u * sizeof(int32_t));
+    }
+
+    memcpy([mb->fmuRho contents], rho, static_cast<size_t>(nElem) * sizeof(float));
+    memcpy([mb->fmuV contents], v_in, static_cast<size_t>(ndof) * sizeof(float));
+    memset([mb->fmuAv contents], 0, static_cast<size_t>(ndof) * sizeof(uint32_t));
+
+    *static_cast<int32_t*>([mb->fmuNElem contents]) = static_cast<int32_t>(nElem);
+
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->femMatVecUniquePso);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -1;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -1;
+
+        [enc setComputePipelineState:mb->femMatVecUniquePso];
+        [enc setBuffer:mb->fmuKe offset:0 atIndex:0];
+        [enc setBuffer:mb->fmuKeIdx offset:0 atIndex:1];
+        [enc setBuffer:mb->fmuDofMap offset:0 atIndex:2];
+        [enc setBuffer:mb->fmuRho offset:0 atIndex:3];
+        [enc setBuffer:mb->fmuV offset:0 atIndex:4];
+        [enc setBuffer:mb->fmuAv offset:0 atIndex:5];
+        [enc setBuffer:mb->fmuNElem offset:0 atIndex:6];
+        [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(nElem), 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    auto* avu = static_cast<const uint32_t*>([mb->fmuAv contents]);
+    for (int i = 0; i < ndof; i++) {
+        uint32_t u = avu[i];
+        float f;
+        std::memcpy(&f, &u, sizeof(float));
+        Av_out[i] = f;
+    }
+    return 0;
+}
+
+int mb_fem_mgpcg_solve(
+    void* ctx,
+    const float* const* mg_ke_unique,
+    const int* const* mg_ke_idx,
+    const int* const* mg_dof_map,
+    const float* const* mg_diag,
+    const unsigned char* const* mg_fixed,
+    const int* const* mg_prolong,
+    const float* const* mg_prolong_w,
+    const float* const* mg_rho,
+    const int* mg_nelem,
+    const int* mg_ndof,
+    const int* mg_num_unique,
+    int numLevels,
+    const float* f_rhs,
+    float* u_inout,
+    int maxIter,
+    float tolRel,
+    int nSmooth,
+    float omegaJacobi,
+    int* out_pcg_iters)
+{
+    if (ctx == nullptr || mg_ke_unique == nullptr || mg_ke_idx == nullptr || mg_dof_map == nullptr
+        || mg_diag == nullptr || mg_fixed == nullptr || mg_rho == nullptr || mg_nelem == nullptr
+        || mg_ndof == nullptr || mg_num_unique == nullptr || f_rhs == nullptr || u_inout == nullptr)
+        return -1;
+    if (numLevels < 2 || numLevels > MB_MG_MAX_LEVELS || maxIter <= 0)
+        return -1;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->femMatVecUniquePso == nil || mb->femFixedPenaltyPso == nil
+        || mb->mgJacobiPso == nil || mb->mgResidualPso == nil || mb->mgRestrictPso == nil
+        || mb->mgProlongatePso == nil || mb->mgZeroPso == nil || mb->mgZeroUintPso == nil
+        || mb->mgPcgAxpyPso == nil || mb->mgPcgDotPartialPso == nil || mb->mgPcgReduceLevelPso == nil)
+        return -1;
+
+    const int n0 = mg_nelem[0];
+    if (mb->mgCachedNElem0 != n0 || mb->mgNumLevels != numLevels) {
+        ReleaseMgHierarchy(mb);
+
+        NSUInteger dotTpg = 256u;
+        if (mb->mgPcgDotPartialPso != nil) {
+            const NSUInteger m = mb->mgPcgDotPartialPso.maxTotalThreadsPerThreadgroup;
+            if (m < dotTpg) {
+                dotTpg = 1u;
+                while (dotTpg * 2u <= m)
+                    dotTpg <<= 1u;
+            }
+        }
+        mb->mgDotTpg = dotTpg;
+
+        MTLResourceOptions opts = MTLResourceStorageModeShared;
+        const int ndof0 = mg_ndof[0];
+        const int nPartCap = std::max(1, (ndof0 + static_cast<int>(dotTpg) - 1) / static_cast<int>(dotTpg));
+        const NSUInteger partBytes = static_cast<NSUInteger>(nPartCap) * sizeof(float);
+        const NSUInteger dof0Bytes = static_cast<NSUInteger>(ndof0) * sizeof(float);
+
+        mb->mgPcgPartials = [mb->device newBufferWithLength:partBytes options:opts];
+        mb->mgPcgPartials2 = [mb->device newBufferWithLength:partBytes options:opts];
+        mb->mgPcgReduceCount = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+        mb->mgPcgP = [mb->device newBufferWithLength:dof0Bytes options:opts];
+        mb->mgPcgZ = [mb->device newBufferWithLength:dof0Bytes options:opts];
+        mb->mgVcRhs = [mb->device newBufferWithLength:dof0Bytes options:opts];
+        mb->mgVcSol = [mb->device newBufferWithLength:dof0Bytes options:opts];
+        mb->mgOmega = [mb->device newBufferWithLength:sizeof(float) options:opts];
+        mb->mgPenaltyBuf = [mb->device newBufferWithLength:sizeof(float) options:opts];
+        mb->mgScratchN = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+        mb->mgAxpyOne = [mb->device newBufferWithLength:sizeof(float) options:opts];
+        mb->mgAxpyZero = [mb->device newBufferWithLength:sizeof(float) options:opts];
+        mb->mgPcgAlpha = [mb->device newBufferWithLength:sizeof(float) options:opts];
+        mb->mgPcgNegAlpha = [mb->device newBufferWithLength:sizeof(float) options:opts];
+        mb->mgPcgBeta = [mb->device newBufferWithLength:sizeof(float) options:opts];
+        mb->mgPcgNegOne = [mb->device newBufferWithLength:sizeof(float) options:opts];
+
+        if (mb->mgPcgPartials == nil || mb->mgPcgPartials2 == nil || mb->mgPcgReduceCount == nil || mb->mgPcgP == nil
+            || mb->mgPcgZ == nil || mb->mgVcRhs == nil || mb->mgVcSol == nil || mb->mgOmega == nil
+            || mb->mgPenaltyBuf == nil || mb->mgScratchN == nil || mb->mgAxpyOne == nil || mb->mgAxpyZero == nil
+            || mb->mgPcgAlpha == nil || mb->mgPcgNegAlpha == nil || mb->mgPcgBeta == nil || mb->mgPcgNegOne == nil) {
+            ReleaseMgHierarchy(mb);
+            return -1;
+        }
+
+        *static_cast<float*>([mb->mgPenaltyBuf contents]) = 1e12f;
+        *static_cast<float*>([mb->mgAxpyOne contents]) = 1.f;
+        *static_cast<float*>([mb->mgAxpyZero contents]) = 0.f;
+        *static_cast<float*>([mb->mgPcgNegOne contents]) = -1.f;
+
+        for (int l = 0; l < numLevels; l++) {
+            const int ne = mg_nelem[l];
+            const int nd = mg_ndof[l];
+            const int nu = mg_num_unique[l];
+            if (ne <= 0 || nd <= 0 || nu <= 0)
+                return -1;
+            if (l >= 1 && (mg_prolong == nullptr || mg_prolong[l] == nullptr || mg_prolong_w == nullptr
+                    || mg_prolong_w[l] == nullptr))
+                return -1;
+
+            const size_t keB = static_cast<size_t>(nu) * 576u * sizeof(float);
+            const size_t idxB = static_cast<size_t>(ne) * sizeof(int32_t);
+            const size_t dmB = static_cast<size_t>(ne) * 24u * sizeof(int32_t);
+            const size_t diagB = static_cast<size_t>(nd) * sizeof(float);
+            const size_t fixB = static_cast<size_t>(nd) * sizeof(unsigned char);
+            const size_t rhoB = static_cast<size_t>(ne) * sizeof(float);
+
+            mb->mgKeUnique[l] = [mb->device newBufferWithLength:keB options:opts];
+            mb->mgKeIdx[l] = [mb->device newBufferWithLength:idxB options:opts];
+            mb->mgDofMap[l] = [mb->device newBufferWithLength:dmB options:opts];
+            mb->mgDiag[l] = [mb->device newBufferWithLength:diagB options:opts];
+            mb->mgFixed[l] = [mb->device newBufferWithLength:fixB options:opts];
+            mb->mgNElemBuf[l] = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+            mb->mgNDofBuf[l] = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+            mb->mgNumUniqBuf[l] = [mb->device newBufferWithLength:sizeof(int32_t) options:opts];
+            mb->mgX[l] = [mb->device newBufferWithLength:diagB options:opts];
+            mb->mgB[l] = [mb->device newBufferWithLength:diagB options:opts];
+            mb->mgR[l] = [mb->device newBufferWithLength:diagB options:opts];
+            mb->mgAx[l] = [mb->device newBufferWithLength:static_cast<NSUInteger>(nd) * sizeof(uint32_t) options:opts];
+            mb->mgRho[l] = [mb->device newBufferWithLength:rhoB options:opts];
+
+            if (mb->mgKeUnique[l] == nil || mb->mgKeIdx[l] == nil || mb->mgDofMap[l] == nil || mb->mgDiag[l] == nil
+                || mb->mgFixed[l] == nil || mb->mgNElemBuf[l] == nil || mb->mgNDofBuf[l] == nil
+                || mb->mgNumUniqBuf[l] == nil || mb->mgX[l] == nil || mb->mgB[l] == nil || mb->mgR[l] == nil
+                || mb->mgAx[l] == nil || mb->mgRho[l] == nil) {
+                ReleaseMgHierarchy(mb);
+                return -1;
+            }
+
+            memcpy([mb->mgKeUnique[l] contents], mg_ke_unique[l], keB);
+            memcpy([mb->mgKeIdx[l] contents], mg_ke_idx[l], idxB);
+            memcpy([mb->mgDofMap[l] contents], mg_dof_map[l], dmB);
+            memcpy([mb->mgFixed[l] contents], mg_fixed[l], fixB);
+
+            *static_cast<int32_t*>([mb->mgNElemBuf[l] contents]) = static_cast<int32_t>(ne);
+            *static_cast<int32_t*>([mb->mgNDofBuf[l] contents]) = static_cast<int32_t>(nd);
+            *static_cast<int32_t*>([mb->mgNumUniqBuf[l] contents]) = static_cast<int32_t>(nu);
+
+            if (l == 0) {
+                mb->mgProlong[l] = nil;
+                mb->mgProlongW[l] = nil;
+            } else {
+                const size_t pB = static_cast<size_t>(mg_ndof[l - 1]) * 8u * sizeof(int32_t);
+                const size_t pwB = static_cast<size_t>(mg_ndof[l - 1]) * 8u * sizeof(float);
+                mb->mgProlong[l] = [mb->device newBufferWithLength:pB options:opts];
+                mb->mgProlongW[l] = [mb->device newBufferWithLength:pwB options:opts];
+                if (mb->mgProlong[l] == nil || mb->mgProlongW[l] == nil) {
+                    ReleaseMgHierarchy(mb);
+                    return -1;
+                }
+                memcpy([mb->mgProlong[l] contents], mg_prolong[l], pB);
+                memcpy([mb->mgProlongW[l] contents], mg_prolong_w[l], pwB);
+            }
+
+            mb->mgCachedNElem[l] = ne;
+            mb->mgCachedNDof[l] = nd;
+            mb->mgCachedNumUnique[l] = nu;
+        }
+
+        mb->mgCachedNElem0 = n0;
+        mb->mgNumLevels = numLevels;
+    }
+
+    for (int l = 0; l < numLevels; l++) {
+        const int ne = mg_nelem[l];
+        const int nd = mg_ndof[l];
+        memcpy([mb->mgRho[l] contents], mg_rho[l], static_cast<size_t>(ne) * sizeof(float));
+        memcpy([mb->mgDiag[l] contents], mg_diag[l], static_cast<size_t>(nd) * sizeof(float));
+    }
+    *static_cast<float*>([mb->mgOmega contents]) = omegaJacobi;
+    memcpy([mb->mgB[0] contents], f_rhs, static_cast<size_t>(mg_ndof[0]) * sizeof(float));
+    memcpy([mb->mgX[0] contents], u_inout, static_cast<size_t>(mg_ndof[0]) * sizeof(float));
+
+    const int ndof0 = mb->mgCachedNDof[0];
+    const size_t dof0z = static_cast<size_t>(ndof0) * sizeof(float);
+
+    {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            MgMatVecUniquePenalty(mb, enc, 0, mb->mgX[0], mb->mgAx[0]);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setComputePipelineState:mb->mgResidualPso];
+            [enc setBuffer:mb->mgR[0] offset:0 atIndex:0];
+            [enc setBuffer:mb->mgB[0] offset:0 atIndex:1];
+            [enc setBuffer:mb->mgAx[0] offset:0 atIndex:2];
+            [enc setBuffer:mb->mgNDofBuf[0] offset:0 atIndex:3];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgResidualPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof0), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            const int w = MgCmdWait(cmd);
+            if (w != 0)
+                return w;
+        }
+    }
+
+    float normB = 1.f;
+    float ff = 0.f;
+    int dr = MgDotGpu(mb, mb->mgB[0], mb->mgB[0], ndof0, &ff);
+    if (dr != 0)
+        return dr;
+    normB = std::sqrt(std::max(ff, 0.f));
+    if (normB < 1e-30f)
+        normB = 1.f;
+
+    {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            [enc setComputePipelineState:mb->mgZeroPso];
+            [enc setBuffer:mb->mgVcSol offset:0 atIndex:0];
+            [enc setBuffer:mb->mgNDofBuf[0] offset:0 atIndex:1];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgZeroPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof0), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            if (MgCmdWait(cmd) != 0)
+                return -99;
+        }
+    }
+
+    memcpy([mb->mgVcRhs contents], [mb->mgR[0] contents], dof0z);
+    {
+        const int vz = VCycleMB(mb, 0, numLevels, nSmooth, mb->mgVcRhs, mb->mgVcSol);
+        if (vz != 0)
+            return vz;
+    }
+
+    {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -99;
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -99;
+            [enc setComputePipelineState:mb->pcgCopyPso];
+            [enc setBuffer:mb->mgPcgP offset:0 atIndex:0];
+            [enc setBuffer:mb->mgVcSol offset:0 atIndex:1];
+            [enc setBuffer:mb->mgNDofBuf[0] offset:0 atIndex:2];
+            NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->pcgCopyPso);
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof0), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            if (MgCmdWait(cmd) != 0)
+                return -99;
+        }
+    }
+
+    float rzOld = 0.f;
+    dr = MgDotGpu(mb, mb->mgR[0], mb->mgPcgP, ndof0, &rzOld);
+    if (dr != 0)
+        return dr;
+
+    int itUsed = 0;
+    float betaGpu = 0.f;
+
+    for (int iter = 0; iter < maxIter; iter++) {
+        itUsed = iter + 1;
+        if (iter > 0) {
+            *static_cast<float*>([mb->mgPcgBeta contents]) = betaGpu;
+            @autoreleasepool {
+                id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+                if (cmd == nil)
+                    return -99;
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                if (enc == nil)
+                    return -99;
+                MgEncodeAxpyMg(mb, enc, mb->mgPcgP, mb->mgPcgZ, mb->mgPcgP, mb->mgAxpyOne, mb->mgPcgBeta, ndof0);
+                [enc endEncoding];
+                [cmd commit];
+                if (MgCmdWait(cmd) != 0)
+                    return -99;
+            }
+        }
+
+        {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+                if (cmd == nil)
+                    return -99;
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                if (enc == nil)
+                    return -99;
+                MgMatVecUniquePenalty(mb, enc, 0, mb->mgPcgP, mb->mgAx[0]);
+                [enc endEncoding];
+                [cmd commit];
+                if (MgCmdWait(cmd) != 0)
+                    return -99;
+            }
+        }
+
+        float denom = 0.f;
+        dr = MgDotGpu(mb, mb->mgPcgP, mb->mgAx[0], ndof0, &denom);
+        if (dr != 0)
+            return dr;
+        if (std::fabs(denom) < 1e-30f)
+            break;
+
+        const float alpha = rzOld / denom;
+        *static_cast<float*>([mb->mgPcgAlpha contents]) = alpha;
+        *static_cast<float*>([mb->mgPcgNegAlpha contents]) = -alpha;
+
+        {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+                if (cmd == nil)
+                    return -99;
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                if (enc == nil)
+                    return -99;
+                MgEncodeAxpyMg(mb, enc, mb->mgX[0], mb->mgX[0], mb->mgPcgP, mb->mgAxpyOne, mb->mgPcgAlpha, ndof0);
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                MgEncodeAxpyMg(mb, enc, mb->mgR[0], mb->mgR[0], mb->mgAx[0], mb->mgAxpyOne, mb->mgPcgNegAlpha, ndof0);
+                [enc endEncoding];
+                [cmd commit];
+                if (MgCmdWait(cmd) != 0)
+                    return -99;
+            }
+        }
+
+        float nr2 = 0.f;
+        dr = MgDotGpu(mb, mb->mgR[0], mb->mgR[0], ndof0, &nr2);
+        if (dr != 0)
+            return dr;
+        if (std::sqrt(std::max(nr2, 0.f)) < tolRel * normB)
+            break;
+
+        {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+                if (cmd == nil)
+                    return -99;
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                if (enc == nil)
+                    return -99;
+                [enc setComputePipelineState:mb->mgZeroPso];
+                [enc setBuffer:mb->mgPcgZ offset:0 atIndex:0];
+                [enc setBuffer:mb->mgNDofBuf[0] offset:0 atIndex:1];
+                NSUInteger tpg = MbThreadsPerThreadgroup1D(mb->mgZeroPso);
+                [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(ndof0), 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+                [enc endEncoding];
+                [cmd commit];
+                if (MgCmdWait(cmd) != 0)
+                    return -99;
+            }
+        }
+
+        memcpy([mb->mgVcRhs contents], [mb->mgR[0] contents], dof0z);
+        {
+            const int vz = VCycleMB(mb, 0, numLevels, nSmooth, mb->mgVcRhs, mb->mgPcgZ);
+            if (vz != 0)
+                return vz;
+        }
+
+        float rzNew = 0.f;
+        dr = MgDotGpu(mb, mb->mgR[0], mb->mgPcgZ, ndof0, &rzNew);
+        if (dr != 0)
+            return dr;
+        betaGpu = rzNew / (rzOld + 1e-40f);
+        rzOld = rzNew;
+    }
+
+    memcpy(u_inout, [mb->mgX[0] contents], dof0z);
+    if (out_pcg_iters != nullptr)
+        *out_pcg_iters = itUsed;
     return 0;
 }
 

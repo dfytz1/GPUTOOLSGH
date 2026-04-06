@@ -139,8 +139,11 @@ namespace GHGPUPlugin.Chromodoris
                 return;
             }
 
+            string solverNote = res.LastLinearSolveUsedMgPcg
+                ? $"MGPCG: {res.MgLevelCount} levels, last linear solve {res.LastLinearSolvePcgIters} PCG iters ({res.LastLinearSolveMs:F1} ms)"
+                : $"CPU / GPU diagonal-PCG path — last linear solve ({res.LastLinearSolveMs:F1} ms)";
             AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
-                "Fast path: elastic SIMP on coarse stride, ρ upsampled to mask res — not sign-off FEA. No density filter.");
+                "Fast path: elastic SIMP on coarse stride, ρ upsampled to mask res — not sign-off FEA. No density filter. " + solverNote);
 
             DA.SetData(0, new GH_ObjectWrapper(res.DensityPhys));
             DA.SetData(1, box);
