@@ -49,6 +49,8 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 Message = ""
             };
 
+            string gpuFallbackMsg = null;
+
             if (volumeFraction <= 0 || volumeFraction > 1)
             {
                 res.Message = "VolumeFraction must be in (0,1].";
@@ -380,10 +382,16 @@ namespace GHGPUPlugin.Chromodoris.Topology
                                 u[i] = uGpu[i];
                             solvedGpuPcg = true;
                         }
+                        else if (outer == 0 && gpuFallbackMsg == null)
+                        {
+                            gpuFallbackMsg = $"GPU_FALLBACK: FemPcgSolve returned {pcgCode}";
+                        }
                     }
                     catch
                     {
                         solvedGpuPcg = false;
+                        if (outer == 0 && gpuFallbackMsg == null)
+                            gpuFallbackMsg = "GPU_FALLBACK: FemPcgSolve threw an exception";
                     }
                 }
 
@@ -444,7 +452,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 UpsampleTrilinear(rhoCoarse, nxc, nyc, nzc, nx, ny, nz, insideFine, res.DensityPhys);
             }
 
-            res.Message = "OK";
+            res.Message = gpuFallbackMsg ?? "OK";
             return res;
         }
 
