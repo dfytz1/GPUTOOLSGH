@@ -4,6 +4,7 @@ using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using System;
+using System.Threading.Tasks;
 
 namespace GHGPUPlugin.Chromodoris
 {
@@ -13,6 +14,12 @@ namespace GHGPUPlugin.Chromodoris
     /// <remarks>SIMP / PCG with optional Metal MatVec; shipped as part of GHGPUPlugin (MetalGH).</remarks>
     public class VoxelSimpTopologyComponent : GH_Component
     {
+        private Task _task = null;
+        private VoxelSimpOptimizer.Result _result = null;
+        private string _errorMsg = null;
+        private bool _running = false;
+        private Box _cachedBox;
+
         public VoxelSimpTopologyComponent()
           : base("Voxel SIMP Topology GPU", "VoxelSIMPGPU",
               "SIMP on a coarse voxel stride (fast), then trilinear upsample to mask resolution for smooth iso. " +
@@ -57,6 +64,44 @@ namespace GHGPUPlugin.Chromodoris
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
+            if (_result != null)
+            {
+                var res = _result;
+                _result = null;
+                _running = false;
+
+                if (res.Message != "OK")
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, res.Message);
+                    return;
+                }
+
+                string solverNote = res.LastLinearSolveUsedMgPcg
+                    ? $"MGPCG: {res.MgLevelCount} levels, last linear solve {res.LastLinearSolvePcgIters} PCG iters ({res.LastLinearSolveMs:F1} ms)"
+                    : $"CPU / GPU diagonal-PCG path — last linear solve ({res.LastLinearSolveMs:F1} ms)";
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    "Fast path: elastic SIMP on coarse stride, ρ upsampled to mask res — not sign-off FEA. No density filter. " + solverNote);
+
+                DA.SetData(0, new GH_ObjectWrapper(res.DensityPhys));
+                DA.SetData(1, _cachedBox);
+                DA.SetData(2, res.Compliance);
+                return;
+            }
+
+            if (_errorMsg != null)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, _errorMsg);
+                _errorMsg = null;
+                _running = false;
+                return;
+            }
+
+            if (_running)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "Solving in background…");
+                return;
+            }
+
             Box box = new Box();
             float[,,] inside = null, support = null, load = null;
             double vf = 0.3;
@@ -120,34 +165,39 @@ namespace GHGPUPlugin.Chromodoris
                 return;
             }
 
-            VoxelSimpOptimizer.Result res;
-            try
-            {
-                res = VoxelSimpOptimizer.Run(
-                    inside, support, load, dx, dy, dz, force, vf,
-                    outer, pcg, simpP, move, emin, nu, maxEl, solveStride, useGpu);
-            }
-            catch (Exception ex)
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, ex.Message);
-                return;
-            }
+            _cachedBox = box;
+            _running = true;
 
-            if (res.Message != "OK")
+            float[,,] insideCap = inside;
+            float[,,] supportCap = support;
+            float[,,] loadCap = load;
+            double dxCap = dx, dyCap = dy, dzCap = dz;
+            var forceCap = force;
+            double vfCap = vf;
+            int outerCap = outer, pcgCap = pcg, maxElCap = maxEl, solveStrideCap = solveStride;
+            bool useGpuCap = useGpu;
+            double simpPCap = simpP, moveCap = move, eminCap = emin, nuCap = nu;
+
+            _task = Task.Run(() =>
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, res.Message);
-                return;
-            }
+                try
+                {
+                    _result = VoxelSimpOptimizer.Run(
+                        insideCap, supportCap, loadCap, dxCap, dyCap, dzCap, forceCap, vfCap,
+                        outerCap, pcgCap, simpPCap, moveCap, eminCap, nuCap, maxElCap, solveStrideCap, useGpuCap);
+                }
+                catch (Exception ex)
+                {
+                    _errorMsg = ex.Message;
+                }
+                finally
+                {
+                    Rhino.RhinoApp.InvokeOnUiThread((Action)(() => ExpireSolution(true)));
+                }
+            });
 
-            string solverNote = res.LastLinearSolveUsedMgPcg
-                ? $"MGPCG: {res.MgLevelCount} levels, last linear solve {res.LastLinearSolvePcgIters} PCG iters ({res.LastLinearSolveMs:F1} ms)"
-                : $"CPU / GPU diagonal-PCG path — last linear solve ({res.LastLinearSolveMs:F1} ms)";
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
-                "Fast path: elastic SIMP on coarse stride, ρ upsampled to mask res — not sign-off FEA. No density filter. " + solverNote);
-
-            DA.SetData(0, new GH_ObjectWrapper(res.DensityPhys));
-            DA.SetData(1, box);
-            DA.SetData(2, res.Compliance);
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "Solving in background…");
+            return;
         }
 
         public override GH_Exposure Exposure => GH_Exposure.quinary;
