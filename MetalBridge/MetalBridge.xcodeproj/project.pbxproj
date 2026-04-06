@@ -13,6 +13,10 @@
 /* Begin PBXFileReference section */
 		B20000000000000000000001 /* MetalBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = MetalBridge.mm; sourceTree = "<group>"; };
 		B20000000000000000000002 /* MetalBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MetalBridge.h; sourceTree = "<group>"; };
+		B20000000000000000000010 /* LaplaceJacobi3D.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LaplaceJacobi3D.metal; sourceTree = "<group>"; };
+		B20000000000000000000011 /* GradientMagnitude3D.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GradientMagnitude3D.metal; sourceTree = "<group>"; };
+		B20000000000000000000012 /* NormalizeContrast3D.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = NormalizeContrast3D.metal; sourceTree = "<group>"; };
+		B20000000000000000000013 /* ZeroVoxelBoundary.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = ZeroVoxelBoundary.metal; sourceTree = "<group>"; };
 		B30000000000000000000001 /* MetalBridge.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = MetalBridge.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -25,6 +29,29 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		BC0000000000000000000002 /* Compile Metal library */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Compile Metal library";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Kernels/default.metallib",
+				"$(CONFIGURATION_BUILD_DIR)/default.metallib",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "cd \"$SRCROOT\" && /bin/sh ./compile_kernels.sh\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXGroup section */
 		B50000000000000000000001 = {
@@ -40,8 +67,20 @@
 			children = (
 				B20000000000000000000002 /* MetalBridge.h */,
 				B20000000000000000000001 /* MetalBridge.mm */,
+				B50000000000000000000004 /* Shaders */,
 			);
 			path = .;
+			sourceTree = "<group>";
+		};
+		B50000000000000000000004 /* Shaders */ = {
+			isa = PBXGroup;
+			children = (
+				B20000000000000000000010 /* LaplaceJacobi3D.metal */,
+				B20000000000000000000011 /* GradientMagnitude3D.metal */,
+				B20000000000000000000012 /* NormalizeContrast3D.metal */,
+				B20000000000000000000013 /* ZeroVoxelBoundary.metal */,
+			);
+			path = Shaders;
 			sourceTree = "<group>";
 		};
 		B50000000000000000000003 /* Products */ = {
@@ -61,6 +100,7 @@
 			buildPhases = (
 				B80000000000000000000001 /* Sources */,
 				B40000000000000000000001 /* Frameworks */,
+				BC0000000000000000000002 /* Compile Metal library */,
 			);
 			buildRules = (
 			);

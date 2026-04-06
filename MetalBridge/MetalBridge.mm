@@ -986,23 +986,37 @@ struct LaplaceParams3DHost {
     float sv, lv;
 };
 
-struct GradParamsHost {
+struct GradParams3DHost {
     uint32_t nx, ny, nz;
     float iDx, iDy, iDz;
 };
 
-struct NormParamsHost {
+struct NormParams3DHost {
     uint32_t n;
     float dMin, dMax;
     int32_t invert;
-    float exp;
+    float exponent;
 };
 
 struct BoundaryParamsHost {
     uint32_t nx, ny, nz;
 };
 
+/// Prefer pipeline threadExecutionWidth (same idea as mb_run_laplacian_iterations threadgroup sizing).
+NSUInteger MbThreadsPerThreadgroup1D(id<MTLComputePipelineState> pso)
+{
+    NSUInteger tw = pso.threadExecutionWidth;
+    if (tw < 1u)
+        tw = 64u;
+    NSUInteger cap = pso.maxTotalThreadsPerThreadgroup;
+    if (cap < 1u)
+        cap = tw;
+    return MIN(tw, cap);
+}
+
 } // namespace
+
+extern "C" {
 
 int mb_laplace_jacobi_3d(
     void* ctx,
@@ -1018,16 +1032,16 @@ int mb_laplace_jacobi_3d(
     int iterations)
 {
     if (ctx == nullptr || inside == nullptr || support == nullptr || load == nullptr || phi == nullptr)
-        return -70;
+        return -1;
     if (nx <= 0 || ny <= 0 || nz <= 0 || iterations <= 0)
-        return -71;
+        return -1;
 
     const size_t n = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
     const NSUInteger nBytes = static_cast<NSUInteger>(n * sizeof(float));
 
     auto* mb = static_cast<MBContext*>(ctx);
     if (mb->queue == nil || mb->laplaceJacobi3dPso == nil)
-        return -72;
+        return -1;
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
     id<MTLBuffer> bIn = [mb->device newBufferWithBytes:inside length:nBytes options:opts];
@@ -1036,7 +1050,7 @@ int mb_laplace_jacobi_3d(
     id<MTLBuffer> bufA = [mb->device newBufferWithLength:nBytes options:opts];
     id<MTLBuffer> bufB = [mb->device newBufferWithLength:nBytes options:opts];
     if (bIn == nil || bSup == nil || bLoa == nil || bufA == nil || bufB == nil)
-        return -73;
+        return -1;
 
     memcpy([bufA contents], phi, nBytes);
 
@@ -1048,46 +1062,42 @@ int mb_laplace_jacobi_3d(
     params.lv = loadVal;
     id<MTLBuffer> bParams = [mb->device newBufferWithBytes:&params length:sizeof(params) options:opts];
     if (bParams == nil)
-        return -74;
+        return -1;
 
     id<MTLComputePipelineState> pso = mb->laplaceJacobi3dPso;
-    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, 256UL);
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(pso);
     const NSUInteger threadCount = static_cast<NSUInteger>(n);
 
-    @autoreleasepool {
-        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
-        if (cmd == nil)
-            return -75;
+    for (int it = 0; it < iterations; it++) {
+        const bool aIsSrc = (it % 2) == 0;
+        id<MTLBuffer> src = aIsSrc ? bufA : bufB;
+        id<MTLBuffer> dst = aIsSrc ? bufB : bufA;
 
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        if (enc == nil)
-            return -76;
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+            if (cmd == nil)
+                return -1;
 
-        [enc setComputePipelineState:pso];
-        [enc setBuffer:bIn offset:0 atIndex:0];
-        [enc setBuffer:bSup offset:0 atIndex:1];
-        [enc setBuffer:bLoa offset:0 atIndex:2];
-        [enc setBuffer:bParams offset:0 atIndex:5];
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -1;
 
-        for (int it = 0; it < iterations; it++) {
-            if (it > 0)
-                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-            const bool readA = (it % 2) == 0;
-            id<MTLBuffer> src = readA ? bufA : bufB;
-            id<MTLBuffer> dst = readA ? bufB : bufA;
+            [enc setComputePipelineState:pso];
+            [enc setBuffer:bIn offset:0 atIndex:0];
+            [enc setBuffer:bSup offset:0 atIndex:1];
+            [enc setBuffer:bLoa offset:0 atIndex:2];
             [enc setBuffer:src offset:0 atIndex:3];
             [enc setBuffer:dst offset:0 atIndex:4];
+            [enc setBuffer:bParams offset:0 atIndex:5];
             [enc dispatchThreads:MTLSizeMake(threadCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
         }
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
     }
 
-    const bool outInB = (iterations % 2) == 1;
-    id<MTLBuffer> out = outInB ? bufB : bufA;
-    memcpy(phi, [out contents], nBytes);
+    id<MTLBuffer> outBuf = (iterations % 2 == 1) ? bufB : bufA;
+    memcpy(phi, [outBuf contents], nBytes);
     return 0;
 }
 
@@ -1104,25 +1114,26 @@ int mb_gradient_magnitude_3d(
     float invDz)
 {
     if (ctx == nullptr || phi == nullptr || inside == nullptr || gradOut == nullptr)
-        return -80;
+        return -1;
     if (nx <= 0 || ny <= 0 || nz <= 0)
-        return -81;
+        return -1;
 
     const size_t n = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
     const NSUInteger nBytes = static_cast<NSUInteger>(n * sizeof(float));
 
     auto* mb = static_cast<MBContext*>(ctx);
     if (mb->queue == nil || mb->gradientMag3dPso == nil)
-        return -82;
+        return -1;
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
     id<MTLBuffer> bPhi = [mb->device newBufferWithBytes:phi length:nBytes options:opts];
     id<MTLBuffer> bIn = [mb->device newBufferWithBytes:inside length:nBytes options:opts];
     id<MTLBuffer> bGrad = [mb->device newBufferWithLength:nBytes options:opts];
     if (bPhi == nil || bIn == nil || bGrad == nil)
-        return -83;
+        return -1;
+    memset([bGrad contents], 0, nBytes);
 
-    GradParamsHost gp{};
+    GradParams3DHost gp{};
     gp.nx = static_cast<uint32_t>(nx);
     gp.ny = static_cast<uint32_t>(ny);
     gp.nz = static_cast<uint32_t>(nz);
@@ -1131,21 +1142,20 @@ int mb_gradient_magnitude_3d(
     gp.iDz = invDz;
     id<MTLBuffer> bParams = [mb->device newBufferWithBytes:&gp length:sizeof(gp) options:opts];
     if (bParams == nil)
-        return -84;
+        return -1;
 
     id<MTLComputePipelineState> pso = mb->gradientMag3dPso;
-    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, 256UL);
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(pso);
     const NSUInteger threadCount = static_cast<NSUInteger>(n);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
         if (cmd == nil)
-            return -85;
+            return -1;
 
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
         if (enc == nil)
-            return -86;
+            return -1;
 
         [enc setComputePipelineState:pso];
         [enc setBuffer:bPhi offset:0 atIndex:0];
@@ -1175,46 +1185,45 @@ int mb_normalize_contrast_3d(
     float exponent)
 {
     if (ctx == nullptr || dataInOut == nullptr || inside == nullptr)
-        return -90;
+        return -1;
     if (nx <= 0 || ny <= 0 || nz <= 0)
-        return -91;
+        return -1;
 
     const size_t n = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
     const NSUInteger nBytes = static_cast<NSUInteger>(n * sizeof(float));
 
     auto* mb = static_cast<MBContext*>(ctx);
     if (mb->queue == nil || mb->normalizeContrast3dPso == nil)
-        return -92;
+        return -1;
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
     id<MTLBuffer> bData = [mb->device newBufferWithBytes:dataInOut length:nBytes options:opts];
     id<MTLBuffer> bIn = [mb->device newBufferWithBytes:inside length:nBytes options:opts];
     if (bData == nil || bIn == nil)
-        return -93;
+        return -1;
 
-    NormParamsHost np{};
+    NormParams3DHost np{};
     np.n = static_cast<uint32_t>(n);
     np.dMin = domainMin;
     np.dMax = domainMax;
     np.invert = invert;
-    np.exp = exponent;
+    np.exponent = exponent;
     id<MTLBuffer> bParams = [mb->device newBufferWithBytes:&np length:sizeof(np) options:opts];
     if (bParams == nil)
-        return -94;
+        return -1;
 
     id<MTLComputePipelineState> pso = mb->normalizeContrast3dPso;
-    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, 256UL);
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(pso);
     const NSUInteger threadCount = static_cast<NSUInteger>(n);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
         if (cmd == nil)
-            return -95;
+            return -1;
 
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
         if (enc == nil)
-            return -96;
+            return -1;
 
         [enc setComputePipelineState:pso];
         [enc setBuffer:bData offset:0 atIndex:0];
@@ -1233,21 +1242,21 @@ int mb_normalize_contrast_3d(
 int mb_zero_voxel_boundary(void* ctx, float* data, int nx, int ny, int nz)
 {
     if (ctx == nullptr || data == nullptr)
-        return -100;
+        return -1;
     if (nx <= 0 || ny <= 0 || nz <= 0)
-        return -101;
+        return -1;
 
     const size_t n = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
     const NSUInteger nBytes = static_cast<NSUInteger>(n * sizeof(float));
 
     auto* mb = static_cast<MBContext*>(ctx);
     if (mb->queue == nil || mb->zeroVoxelBoundaryPso == nil)
-        return -102;
+        return -1;
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
     id<MTLBuffer> bData = [mb->device newBufferWithBytes:data length:nBytes options:opts];
     if (bData == nil)
-        return -103;
+        return -1;
 
     BoundaryParamsHost bp{};
     bp.nx = static_cast<uint32_t>(nx);
@@ -1255,21 +1264,20 @@ int mb_zero_voxel_boundary(void* ctx, float* data, int nx, int ny, int nz)
     bp.nz = static_cast<uint32_t>(nz);
     id<MTLBuffer> bParams = [mb->device newBufferWithBytes:&bp length:sizeof(bp) options:opts];
     if (bParams == nil)
-        return -104;
+        return -1;
 
     id<MTLComputePipelineState> pso = mb->zeroVoxelBoundaryPso;
-    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, 256UL);
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(pso);
     const NSUInteger threadCount = static_cast<NSUInteger>(n);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
         if (cmd == nil)
-            return -105;
+            return -1;
 
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
         if (enc == nil)
-            return -106;
+            return -1;
 
         [enc setComputePipelineState:pso];
         [enc setBuffer:bData offset:0 atIndex:0];
@@ -1283,3 +1291,5 @@ int mb_zero_voxel_boundary(void* ctx, float* data, int nx, int ny, int nz)
     memcpy(data, [bData contents], nBytes);
     return 0;
 }
+
+} // extern "C"
