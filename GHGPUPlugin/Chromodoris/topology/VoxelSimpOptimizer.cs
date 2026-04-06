@@ -24,6 +24,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             public bool GpuPcgUsed;        // true if FemPcgSolve returned 0 at least once
             public int PcgFallbackCode;    // last non-zero pcgCode, 0 if never failed
             public string DiagMessage;     // detailed diagnostic string
+            public string GpuDiagPreSolve; // first-iteration snapshot of GPU inputs
         }
 
         public static Result Run(
@@ -374,6 +375,25 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             fGpu[i] = (float)f[i];
                             uGpu[i] = (float)u[i];
                             diagGpu[i] = (float)diag[i];
+                        }
+
+                        if (outer == 0 && string.IsNullOrEmpty(res.GpuDiagPreSolve))
+                        {
+                            double diagSum = 0, fSum = 0, rhoSum = 0;
+                            float diagMin = float.MaxValue, diagMax = float.MinValue;
+                            for (int i = 0; i < ndof; i++)
+                            {
+                                float d = diagGpu[i];
+                                diagSum += d;
+                                fSum += fGpu[i];
+                                if (d < diagMin) diagMin = d;
+                                if (d > diagMax) diagMax = d;
+                            }
+                            for (int e = 0; e < nElem; e++) rhoSum += rhoFlat[e];
+                            res.GpuDiagPreSolve =
+                                $"PRE_SOLVE: diagSum={diagSum:G4} diagMin={diagMin:G4} diagMax={diagMax:G4} " +
+                                $"fSum={fSum:G4} rhoSum={rhoSum:G4} nElem={nElem} ndof={ndof} " +
+                                $"maxPcgIter={maxPcgIter} penalty={Penalty}";
                         }
 
                         var uHandle = GCHandle.Alloc(uGpu, GCHandleType.Pinned);

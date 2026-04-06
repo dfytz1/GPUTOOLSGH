@@ -225,6 +225,9 @@ namespace GHGPUPlugin.Chromodoris
             if (!string.IsNullOrWhiteSpace(res.DiagMessage))
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, res.DiagMessage);
 
+            if (!string.IsNullOrWhiteSpace(res.GpuDiagPreSolve))
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, res.GpuDiagPreSolve);
+
             DA.SetData(0, new GH_ObjectWrapper(res.DensityPhys));
             DA.SetData(1, box);
             DA.SetData(2, res.Compliance);
