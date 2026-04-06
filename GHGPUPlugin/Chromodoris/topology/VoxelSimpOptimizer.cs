@@ -398,6 +398,9 @@ namespace GHGPUPlugin.Chromodoris.Topology
             double lastPenaltyUsed = simpP;
             double lastMoveUsed = moveLimit;
 
+            var pathProtected = new bool[nElem];
+            var pathProtectRemaining = new int[nElem];
+
             for (int outer = 0; outer < maxOuterIter; outer++)
             {
                 int outerIter = outer + 1;
@@ -537,7 +540,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 if (recordHistory && res.DensityHistory != null)
                     res.DensityHistory.Add((float[,,])res.DensityPhys.Clone());
 
-                OcUpdate(nElem, x, dc, passive, volTarget, moveIter, 0.001, xNew);
+                OcUpdate(nElem, x, dc, passive, volTarget, moveIter, 0.001, xNew, pathProtected);
 
                 double change = 0;
                 for (int e = 0; e < nElem; e++)
@@ -546,8 +549,21 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     x[e] = xNew[e];
                 }
 
+                bool restoredPath = false;
                 if (enforceConnectivity && outer > 2)
-                    EnforceConnectivity(x, ex, ey, ez, nElem, isSupportEl, isLoadEl);
+                    restoredPath = EnforceConnectivity(x, ex, ey, ez, nElem, isSupportEl, isLoadEl, pathProtected, pathProtectRemaining);
+
+                if (!restoredPath)
+                {
+                    for (int e = 0; e < nElem; e++)
+                    {
+                        if (pathProtectRemaining[e] <= 0)
+                            continue;
+                        pathProtectRemaining[e]--;
+                        if (pathProtectRemaining[e] == 0)
+                            pathProtected[e] = false;
+                    }
+                }
 
                 res.IterationsUsed = outer + 1;
                 if (change < 0.01 && outer > 5) break;
@@ -909,18 +925,22 @@ namespace GHGPUPlugin.Chromodoris.Topology
         }
 
         /// <summary>
-        /// If support–load connectivity through elements with rho above 0.1 fails, boost density along a minimum-cost path (prefers existing material).
+        /// If support–load connectivity through elements with rho above 0.05 fails, boost density along a minimum-cost path (prefers existing material).
+        /// Restored path elements get pathProtected and 3 outer iterations of OC floor (remaining=3; decay skipped the iteration a path is restored).
         /// </summary>
-        private static void EnforceConnectivity(
+        /// <returns>True if a minimum-cost path was boosted and marked protected.</returns>
+        private static bool EnforceConnectivity(
             double[] rho,
             int[] ex, int[] ey, int[] ez,
             int nElem,
             bool[] isSupport,
             bool[] isLoad,
-            double restoreRho = 0.5)
+            bool[] pathProtected,
+            int[] pathProtectRemaining,
+            double restoreRho = 0.9)
         {
             if (nElem == 0)
-                return;
+                return false;
 
             var cellToElem = new Dictionary<(int, int, int), int>(nElem);
             for (int e = 0; e < nElem; e++)
@@ -947,7 +967,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             if (di == 0 && dj == 0 && dk == 0) continue;
                             if (!cellToElem.TryGetValue((ex[u] + di, ey[u] + dj, ez[u] + dk), out int v))
                                 continue;
-                            if (visited[v] || rho[v] <= 0.1)
+                            if (visited[v] || rho[v] <= 0.05)
                                 continue;
                             visited[v] = true;
                             q.Enqueue(v);
@@ -959,7 +979,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             for (int e = 0; e < nElem; e++)
             {
                 if (isLoad[e] && visited[e])
-                    return;
+                    return false;
             }
 
             var dist = new double[nElem];
@@ -1020,17 +1040,21 @@ namespace GHGPUPlugin.Chromodoris.Topology
             }
 
             if (bestL < 0)
-                return;
+                return false;
 
             int cur = bestL;
             while (cur >= 0)
             {
                 if (rho[cur] < restoreRho)
                     rho[cur] = restoreRho;
+                pathProtected[cur] = true;
+                pathProtectRemaining[cur] = 3;
                 if (isSupport[cur])
                     break;
                 cur = parent[cur];
             }
+
+            return true;
         }
 
         /// <summary>
@@ -1201,7 +1225,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
         }
 
         private static void OcUpdate(int nElem, double[] x, double[] dc, bool[] passive, double volTarget,
-            double move, double xmin, double[] xNew)
+            double move, double xmin, double[] xNew, bool[] pathProtected)
         {
             double l1 = 1e-12, l2 = 1e12;
             for (int bis = 0; bis < 80; bis++)
@@ -1234,6 +1258,14 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 double step = Math.Sqrt(Math.Max(1e-30, -dc[e] / (lmidF + 1e-30)));
                 double raw = x[e] * step;
                 xNew[e] = Math.Max(xmin, Math.Max(x[e] - move, Math.Min(1, Math.Min(x[e] + move, raw))));
+            }
+
+            const double pathProtectFloor = 0.7;
+            for (int e = 0; e < nElem; e++)
+            {
+                if (passive[e] || !pathProtected[e])
+                    continue;
+                xNew[e] = Math.Max(xNew[e], pathProtectFloor);
             }
         }
     }

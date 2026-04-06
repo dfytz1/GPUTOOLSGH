@@ -54,7 +54,7 @@ namespace GHGPUPlugin.Chromodoris
             pManager.AddNumberParameter("FilterRadius", "Fr",
                 "Sensitivity filter radius in element units (0 = off, 1.5 recommended).", GH_ParamAccess.item, 1.5);
             pManager.AddBooleanParameter("EnforceConnectivity", "Conn",
-                "After OC, bridge support–load if no rho-above-0.1 path (from iteration 4 onward).", GH_ParamAccess.item, true);
+                "After OC, bridge support–load if no rho-above-0.05 path (from iteration 4 onward).", GH_ParamAccess.item, true);
             pManager[14].Optional = true;
             pManager[15].Optional = true;
             pManager[16].Optional = true;
