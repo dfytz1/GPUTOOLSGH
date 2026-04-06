@@ -60,6 +60,51 @@ public static class MetalBridge
         int iterations,
         [In] byte[] fixedMask);
 
+    [DllImport(LibName, EntryPoint = "mb_fem_matvec", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int FemMatVec(
+        IntPtr ctx,
+        [In] float[] Ke_flat,
+        [In] int[] dofMap,
+        [In] float[] rho,
+        [In] float[] v_in,
+        [Out] float[] Av_out,
+        int nElem,
+        int ndof);
+
+    [DllImport(LibName, EntryPoint = "mb_voxel_sample", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int VoxelSample(
+        IntPtr ctx,
+        [In] float[] ptX,
+        [In] float[] ptY,
+        [In] float[] ptZ,
+        [In] float[] charge,
+        [Out] float[] gridOut,
+        float bbMinX,
+        float bbMinY,
+        float bbMinZ,
+        float dxCell,
+        float dyCell,
+        float dzCell,
+        int nx,
+        int ny,
+        int nz,
+        int nPoints,
+        float range,
+        int linearFalloff,
+        int densitySampling);
+
+    [DllImport(LibName, EntryPoint = "mb_proximity_blend", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int ProximityBlend(
+        IntPtr ctx,
+        [In] float[] gradNorm,
+        [In] float[] distSL,
+        [In] float[] inside,
+        [Out] float[] densityOut,
+        [In] float[] proximityParams,
+        int nx,
+        int ny,
+        int nz);
+
     [DllImport(LibName, EntryPoint = "mb_closest_points_cloud", CallingConvention = CallingConvention.Cdecl)]
     public static extern int ClosestPointsCloud(
         IntPtr ctx,

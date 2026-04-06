@@ -1,3 +1,4 @@
+using GHGPUPlugin.NativeInterop;
 using Rhino.Geometry;
 using System;
 using System.Collections.Generic;
@@ -35,7 +36,8 @@ namespace GHGPUPlugin.Chromodoris.Topology
             double emin,
             double nu,
             int maxElements,
-            int solveStride)
+            int solveStride,
+            bool useGpuMatVec = true)
         {
             int nx = insideFine.GetLength(0);
             int ny = insideFine.GetLength(1);
@@ -262,6 +264,60 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             double eminClamped = Math.Max(1e-9, Math.Min(emin, 0.5));
 
+            IntPtr gpuCtx = IntPtr.Zero;
+            bool useGpu = useGpuMatVec && MetalSharedContext.TryGetContext(out gpuCtx);
+            float[] Ke_flat = null;
+            int[] dofMapFlat = null;
+            float[] rhoFlat = null;
+            float[] vFlat = null;
+            float[] AvFlat = null;
+
+            if (useGpu)
+            {
+                Ke_flat = new float[nElem * 24 * 24];
+                dofMapFlat = new int[nElem * 24];
+                rhoFlat = new float[nElem];
+                vFlat = new float[ndof];
+                AvFlat = new float[ndof];
+
+                for (int e = 0; e < nElem; e++)
+                {
+                    double[,] K0 = K0e[e];
+                    int baseK = e * 24 * 24;
+                    for (int a = 0; a < 24; a++)
+                        for (int b = 0; b < 24; b++)
+                            Ke_flat[baseK + a * 24 + b] = (float)K0[a, b];
+                    for (int a = 0; a < 24; a++)
+                        dofMapFlat[e * 24 + a] = dofMap[e, a];
+                }
+            }
+
+            Action<double[], double[]> matVecFn = (vecIn, vecOut) =>
+            {
+                if (useGpu && Ke_flat != null && dofMapFlat != null && rhoFlat != null && vFlat != null && AvFlat != null)
+                {
+                    for (int e = 0; e < nElem; e++)
+                        rhoFlat[e] = (float)StiffnessInterp(x[e], passive[e], eminClamped, simpP);
+                    for (int i = 0; i < ndof; i++)
+                        vFlat[i] = (float)vecIn[i];
+
+                    int code = MetalBridge.FemMatVec(
+                        gpuCtx, Ke_flat, dofMapFlat, rhoFlat, vFlat, AvFlat, nElem, ndof);
+
+                    if (code == 0)
+                    {
+                        for (int i = 0; i < ndof; i++)
+                            vecOut[i] = AvFlat[i];
+                        for (int i = 0; i < ndof; i++)
+                            if (fixedDof[i])
+                                vecOut[i] += Penalty * vecIn[i];
+                        return;
+                    }
+                }
+
+                MatVec(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, vecIn, vecOut);
+            };
+
             for (int outer = 0; outer < maxOuterIter; outer++)
             {
                 BuildDiagonal(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag);
@@ -270,7 +326,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     Array.Clear(u, 0, ndof);
 
                 double tolRel = outer * 3 < maxOuterIter * 2 ? 1e-5 : 1e-7;
-                PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag, f, u, y, r, zvec, pvec, Ap, maxPcgIter, tolRel);
+                PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag, f, u, y, r, zvec, pvec, Ap, matVecFn, maxPcgIter, tolRel);
 
                 double C = Dot(f, u);
 
@@ -507,10 +563,11 @@ namespace GHGPUPlugin.Chromodoris.Topology
         private static void PcgSolve(int nElem, int[,] dofMap, bool[] fixedDof, double[][,] K0e, double[] x,
             bool[] passive, double emin, double p, double[] diag, double[] b, double[] u,
             double[] y, double[] r, double[] zvec, double[] pvec, double[] Ap,
+            Action<double[], double[]> matVecFn,
             int maxIter, double tolRel)
         {
             int n = b.Length;
-            MatVec(nElem, dofMap, fixedDof, K0e, x, passive, emin, p, u, y);
+            matVecFn(u, y);
             for (int i = 0; i < n; i++)
                 r[i] = b[i] - y[i];
 
@@ -528,7 +585,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             for (int it = 0; it < maxIter; it++)
             {
-                MatVec(nElem, dofMap, fixedDof, K0e, x, passive, emin, p, pvec, Ap);
+                matVecFn(pvec, Ap);
                 double denom = Dot(pvec, Ap);
                 if (Math.Abs(denom) < 1e-40) break;
                 double alpha = rzOld / denom;

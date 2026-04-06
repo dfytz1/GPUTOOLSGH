@@ -56,6 +56,50 @@ int mb_run_laplacian_constrained(
     int iterations,
     const unsigned char* fixedMask);
 
+/// Matrix-free FEM stiffness × vector (hex8, 24 DOF/element). Accumulates with device atomics; @p Av_out filled on host; fixed-DOF penalty on host.
+int mb_fem_matvec(
+    void* ctx,
+    const float* Ke_flat,
+    const int* dofMap,
+    const float* rho,
+    const float* v_in,
+    float* Av_out,
+    int nElem,
+    int ndof);
+
+int mb_voxel_sample(
+    void* ctx,
+    const float* ptX,
+    const float* ptY,
+    const float* ptZ,
+    const float* charge,
+    float* gridOut,
+    float bbMinX,
+    float bbMinY,
+    float bbMinZ,
+    float dxCell,
+    float dyCell,
+    float dzCell,
+    int nx,
+    int ny,
+    int nz,
+    int nPoints,
+    float range,
+    int linearFalloff,
+    int densitySampling);
+
+/// @p params is 24 floats: mix, contrast, invProxMax, rslInv, wc, rcInv, includeSl, useCenter, distSentinel, origin(3), ex(3), ey(3), ez(3), boxCenter(3).
+int mb_proximity_blend(
+    void* ctx,
+    const float* gradNorm,
+    const float* distSL,
+    const float* inside,
+    float* densityOut,
+    const float* params,
+    int nx,
+    int ny,
+    int nz);
+
 /// Closest point on triangle mesh (brute force per query). @p triIndices length @p triangleCount * 3 (vertex indices per triangle).
 int mb_closest_points_mesh(
     void* ctx,

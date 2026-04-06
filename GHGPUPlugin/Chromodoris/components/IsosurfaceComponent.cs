@@ -3,7 +3,6 @@
  * https://github.com/camnewnham/ChromodorisGH
  */
 
-using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
 using System;
@@ -13,7 +12,7 @@ namespace GHGPUPlugin.Chromodoris
     public class IsosurfaceComponent : GH_Component
     {
         public IsosurfaceComponent()
-          : base("Build IsoSurface GPU", "IsoSurfaceGPU",
+          : base("Build IsoSurface", "IsoSurface",
               "Constructs a 3D isosurface mesh from voxel data and the same bounding box the grid was built on.",
               "GPUTools", "Mesh")
         {
@@ -25,9 +24,6 @@ namespace GHGPUPlugin.Chromodoris
             pManager.AddGenericParameter("VoxelData", "D", "Voxel data (float[x,y,z]) from Sample Voxels.", GH_ParamAccess.item);
             pManager.AddNumberParameter("IsoValue", "V", "The threshold value at which to extract the surface.", GH_ParamAccess.item);
             pManager.AddBooleanParameter("CellCentered", "Cc", "True: values live at cell centers (Voxel Design Domain / Laplace). False: corner grid (Sample Voxels).", GH_ParamAccess.item, true);
-            pManager.AddBooleanParameter("UseGPU", "GPU",
-                "Reserved — marching cubes is CPU-only in this build.", GH_ParamAccess.item, true);
-            pManager[4].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -46,12 +42,6 @@ namespace GHGPUPlugin.Chromodoris
             if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 1, this, out voxelData, "Voxel data")) return;
             if (!DA.GetData(2, ref isovalue)) return;
             DA.GetData(3, ref cellCentered);
-            bool useGpu = true;
-            DA.GetData(4, ref useGpu);
-            NativeLoader.EnsureLoaded();
-            if (useGpu)
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
-                    "Marching cubes is CPU-only. GPU reserved for future release.");
 
             if (voxelData == null)
             {

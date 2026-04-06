@@ -1,6 +1,7 @@
 using Rhino.Geometry;
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace GHGPUPlugin.Chromodoris.Topology
 {
@@ -51,7 +52,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             if (insideValue == 0f)
                 return data;
 
-            for (int i = 0; i < nx; i++)
+            Parallel.For(0, nx, i =>
             {
                 for (int j = 0; j < ny; j++)
                 {
@@ -62,7 +63,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             data[i, j, k] = insideValue;
                     }
                 }
-            }
+            });
 
             return data;
         }
@@ -179,7 +180,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             var mask = new float[nx, ny, nz];
             if (geometries == null) return mask;
 
-            for (int i = 0; i < nx; i++)
+            Parallel.For(0, nx, i =>
             {
                 for (int j = 0; j < ny; j++)
                 {
@@ -191,7 +192,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             mask[i, j, k] = 1f;
                     }
                 }
-            }
+            });
 
             return mask;
         }

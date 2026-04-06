@@ -12,7 +12,7 @@ namespace GHGPUPlugin.Chromodoris
     public class VoxelDesignDomainComponent : GH_Component
     {
         public VoxelDesignDomainComponent()
-          : base("Voxel Design Domain GPU", "VoxDomainGPU",
+          : base("Voxel Design Domain", "VoxDomain",
               "Turns a closed solid mesh into a regular voxel mask (Inside value in solid, 0 outside). Use with Laplace Field Density.",
               "GPUTools", "Voxel")
         {

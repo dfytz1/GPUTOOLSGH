@@ -39,7 +39,7 @@ namespace GHGPUPlugin.Chromodoris
             pManager.AddNumberParameter("CenterWeight", "Wc", "Weight for box-center proximity (0 = off that term).", GH_ParamAccess.item, 0.25);
             pManager.AddNumberParameter("CenterRadius", "Rc", "World falloff from box center; 0 = disable center term.", GH_ParamAccess.item, 0.0);
             pManager.AddBooleanParameter("UseGPU", "GPU",
-                "Use Metal GPU for Laplace solve and gradient. CPU fallback if unavailable.", GH_ParamAccess.item, true);
+                "Use Metal for Laplace, gradient, and normalize/contrast passes. CPU fallback if unavailable.", GH_ParamAccess.item, true);
             pManager[12].Optional = true;
             pManager[13].Optional = true;
         }
@@ -111,29 +111,50 @@ namespace GHGPUPlugin.Chromodoris
 
             float[] fGrad = new float[total];
             bool gpuGrad = useGpu && gpuPhi && VoxelGpuHelper.TryGradientGpu(
-                this, VoxelGpuHelper.Flatten(phi), fIn, fGrad, nx, ny, nz, iDx, iDy, iDz);
-            float[,,] grad = gpuGrad
-                ? VoxelGpuHelper.Unflatten(fGrad, nx, ny, nz)
-                : WorkflowAGrid.GradientMagnitude(phi, inside, nx, ny, nz, dx, dy, dz);
+                this, fPhi, fIn, fGrad, nx, ny, nz, iDx, iDy, iDz);
+            if (!gpuGrad)
+                fGrad = VoxelGpuHelper.Flatten(WorkflowAGrid.GradientMagnitude(phi, inside, nx, ny, nz, dx, dy, dz));
 
             sw.Stop();
             if (gpuPhi)
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
-                    $"GPU Laplace+Gradient ({sw.ElapsedMilliseconds} ms)");
-
-            float[,,] laplaceD = (float[,,])grad.Clone();
-            WorkflowAGrid.NormalizeToUnitInterval(laplaceD, inside, nx, ny, nz, inv);
+                    $"GPU Laplace+Gradient+normalize ({sw.ElapsedMilliseconds} ms)");
 
             double mix = Rhino.RhinoMath.Clamp(pmx, 0.0, 1.0);
             float[,,] density;
 
             if (mix < 1e-12)
             {
-                density = laplaceD;
-                WorkflowAGrid.ApplyContrast(density, inside, nx, ny, nz, contrast);
+                float[] fDen = (float[])fGrad.Clone();
+                VoxelGpuHelper.DomainMinMax(fDen, fIn, total, out float dMin, out float dMax);
+                bool gpuNorm = useGpu && VoxelGpuHelper.TryNormalizeGpu(
+                    this, fDen, fIn, nx, ny, nz, dMin, dMax, inv, (float)contrast);
+                if (gpuNorm)
+                    density = VoxelGpuHelper.Unflatten(fDen, nx, ny, nz);
+                else
+                {
+                    density = VoxelGpuHelper.Unflatten((float[])fGrad.Clone(), nx, ny, nz);
+                    WorkflowAGrid.NormalizeToUnitInterval(density, inside, nx, ny, nz, inv);
+                    WorkflowAGrid.ApplyContrast(density, inside, nx, ny, nz, contrast);
+                }
             }
             else
             {
+                float[] fLap = (float[])fGrad.Clone();
+                VoxelGpuHelper.DomainMinMax(fLap, fIn, total, out float lMin, out float lMax);
+                bool gpuLapNorm = useGpu && VoxelGpuHelper.TryNormalizeGpu(
+                    this, fLap, fIn, nx, ny, nz, lMin, lMax, inv, 1f);
+                float[,,] laplaceD;
+                if (gpuLapNorm)
+                    laplaceD = VoxelGpuHelper.Unflatten(fLap, nx, ny, nz);
+                else
+                {
+                    laplaceD = VoxelGpuHelper.Unflatten((float[])fGrad.Clone(), nx, ny, nz);
+                    WorkflowAGrid.NormalizeToUnitInterval(laplaceD, inside, nx, ny, nz, inv);
+                }
+
+                float[] fGradNorm = gpuLapNorm ? fLap : VoxelGpuHelper.Flatten(laplaceD);
+
                 BoundingBox bb = box.BoundingBox;
                 double sx = bb.Max.X - bb.Min.X, sy = bb.Max.Y - bb.Min.Y, sz = bb.Max.Z - bb.Min.Z;
                 double diag = Math.Sqrt(sx * sx + sy * sy + sz * sz);
@@ -143,15 +164,61 @@ namespace GHGPUPlugin.Chromodoris
                     rslWorld = 1.0;
 
                 float[,,] dSl = ProximityDensityBlend.MinDistanceToSupportLoadWorld(box, inside, support, load, nx, ny, nz);
-                var proximity = new float[nx, ny, nz];
-                ProximityDensityBlend.FillProximityField(proximity, inside, dSl, box, nx, ny, nz, includeSl, rslWorld, wc, rc);
+                float[] fDist = VoxelGpuHelper.Flatten(dSl);
 
-                var proxNorm = (float[,,])proximity.Clone();
-                WorkflowAGrid.NormalizeToUnitInterval(proxNorm, inside, nx, ny, nz, false);
+                float pMax = MaxRawProximity(dSl, inside, box, nx, ny, nz, includeSl, rslWorld, wc, rc);
+                if (pMax < 1e-30f)
+                    pMax = 1f;
+                float invProxMax = 1f / pMax;
 
-                density = new float[nx, ny, nz];
-                ProximityDensityBlend.Blend(laplaceD, proxNorm, inside, nx, ny, nz, mix, density);
-                WorkflowAGrid.ApplyContrast(density, inside, nx, ny, nz, contrast);
+                var proxParams = new float[24];
+                FillProximityBlendParams(proxParams, mix, contrast, invProxMax, includeSl, rslWorld, wc, rc, box, nx, ny, nz);
+
+                float[,,]? densityMix = null;
+                bool gpuBlend = false;
+                if (useGpu && MetalSharedContext.TryGetContext(out IntPtr ctxPb))
+                {
+                    var densityFlat = new float[total];
+                    int cBlend = MetalBridge.ProximityBlend(ctxPb, fGradNorm, fDist, fIn, densityFlat, proxParams, nx, ny, nz);
+                    if (cBlend == 0)
+                    {
+                        densityMix = VoxelGpuHelper.Unflatten(densityFlat, nx, ny, nz);
+                        gpuBlend = true;
+                    }
+                }
+
+                if (!gpuBlend)
+                {
+                    densityMix = new float[nx, ny, nz];
+                    var proximity = new float[nx, ny, nz];
+                    ProximityDensityBlend.FillProximityField(proximity, inside, dSl, box, nx, ny, nz, includeSl, rslWorld, wc, rc);
+
+                    var proxNorm = (float[,,])proximity.Clone();
+                    float[] fProxN = VoxelGpuHelper.Flatten(proxNorm);
+                    VoxelGpuHelper.DomainMinMax(fProxN, fIn, total, out float pMin, out float pMax2);
+                    bool gpuProxNorm = useGpu && VoxelGpuHelper.TryNormalizeGpu(
+                        this, fProxN, fIn, nx, ny, nz, pMin, pMax2, false, 1f);
+                    float[,,] proxNormArr;
+                    if (gpuProxNorm)
+                        proxNormArr = VoxelGpuHelper.Unflatten(fProxN, nx, ny, nz);
+                    else
+                    {
+                        WorkflowAGrid.NormalizeToUnitInterval(proxNorm, inside, nx, ny, nz, false);
+                        proxNormArr = proxNorm;
+                    }
+
+                    ProximityDensityBlend.Blend(laplaceD, proxNormArr, inside, nx, ny, nz, mix, densityMix);
+
+                    float[] fDenOut = VoxelGpuHelper.Flatten(densityMix);
+                    bool gpuContrast = useGpu && VoxelGpuHelper.TryNormalizeGpu(
+                        this, fDenOut, fIn, nx, ny, nz, 0f, 1f, false, (float)contrast);
+                    if (gpuContrast)
+                        densityMix = VoxelGpuHelper.Unflatten(fDenOut, nx, ny, nz);
+                    else
+                        WorkflowAGrid.ApplyContrast(densityMix, inside, nx, ny, nz, contrast);
+                }
+
+                density = densityMix!;
             }
 
             DA.SetData(0, new GH_ObjectWrapper(phi));
@@ -167,5 +234,98 @@ namespace GHGPUPlugin.Chromodoris
         protected override System.Drawing.Bitmap Icon => Icons.LaplaceProximity;
 
         public override Guid ComponentGuid => new Guid("833129d1-704a-45b6-8da7-d96b7fa0e8fb");
+
+        private static float MaxRawProximity(float[,,] dSl, float[,,] inside, Box box, int nx, int ny, int nz,
+            bool includeSl, double rslWorld, double wc, double rc)
+        {
+            float pMax = 0f;
+            for (int ix = 0; ix < nx; ix++)
+            {
+                for (int iy = 0; iy < ny; iy++)
+                {
+                    for (int iz = 0; iz < nz; iz++)
+                    {
+                        if (inside[ix, iy, iz] < 0.5f)
+                            continue;
+                        float p = RawProximityAt(dSl[ix, iy, iz], inside, ix, iy, iz, box, nx, ny, nz, includeSl, rslWorld, wc, rc);
+                        if (p > pMax)
+                            pMax = p;
+                    }
+                }
+            }
+
+            return pMax;
+        }
+
+        private static float RawProximityAt(
+            float dSlVal,
+            float[,,] inside,
+            int ix,
+            int iy,
+            int iz,
+            Box box,
+            int nx,
+            int ny,
+            int nz,
+            bool includeSl,
+            double rslWorld,
+            double wc,
+            double rc)
+        {
+            if (inside[ix, iy, iz] < 0.5f)
+                return 0f;
+            float pSl = 0f;
+            if (includeSl && rslWorld > 1e-12)
+            {
+                if (dSlVal < float.MaxValue * 0.5f)
+                    pSl = (float)Math.Exp(-dSlVal / rslWorld);
+            }
+
+            float p = pSl;
+            if (wc > 1e-12 && rc > 1e-12)
+            {
+                Point3d c = WorkflowAGrid.CellCenterWorld(box, ix, iy, iz, nx, ny, nz);
+                Point3d boxCenter = box.BoundingBox.Center;
+                double dc = c.DistanceTo(boxCenter);
+                float pC = (float)Math.Exp(-dc / rc);
+                p = Math.Max(p, (float)(wc * pC));
+            }
+
+            return p;
+        }
+
+        private static void FillProximityBlendParams(float[] p, double mixVal, double contrastExp, float invProxMax,
+            bool includeSl, double rslWorld, double wc, double rc, Box box, int nx, int ny, int nz)
+        {
+            p[0] = (float)mixVal;
+            p[1] = (float)contrastExp;
+            p[2] = invProxMax;
+            p[3] = includeSl && rslWorld > 1e-12 ? (float)(1.0 / rslWorld) : 0f;
+            p[4] = (float)wc;
+            p[5] = wc > 1e-12 && rc > 1e-12 ? (float)(1.0 / rc) : 0f;
+            p[6] = includeSl ? 1f : 0f;
+            p[7] = wc > 1e-12 && rc > 1e-12 ? 1f : 0f;
+            p[8] = float.MaxValue * 0.25f;
+            Point3d o = box.PointAt(0, 0, 0);
+            Vector3d ex = (box.PointAt(1, 0, 0) - o) / Math.Max(1, nx);
+            Vector3d ey = (box.PointAt(0, 1, 0) - o) / Math.Max(1, ny);
+            Vector3d ez = (box.PointAt(0, 0, 1) - o) / Math.Max(1, nz);
+            p[9] = (float)o.X;
+            p[10] = (float)o.Y;
+            p[11] = (float)o.Z;
+            p[12] = (float)ex.X;
+            p[13] = (float)ex.Y;
+            p[14] = (float)ex.Z;
+            p[15] = (float)ey.X;
+            p[16] = (float)ey.Y;
+            p[17] = (float)ey.Z;
+            p[18] = (float)ez.X;
+            p[19] = (float)ez.Y;
+            p[20] = (float)ez.Z;
+            Point3d bc = box.BoundingBox.Center;
+            p[21] = (float)bc.X;
+            p[22] = (float)bc.Y;
+            p[23] = (float)bc.Z;
+        }
     }
 }

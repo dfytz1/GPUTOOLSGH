@@ -13,7 +13,7 @@ namespace GHGPUPlugin.Chromodoris
     public class VoxelPaintRegionsComponent : GH_Component
     {
         public VoxelPaintRegionsComponent()
-          : base("Voxel Paint Regions GPU", "VoxPaintGPU",
+          : base("Voxel Paint Regions", "VoxPaint",
               "Marks voxels near support geometry (φ=0) and load geometry (φ=1). Grid must match InsideMask dimensions.",
               "GPUTools", "Voxel")
         {

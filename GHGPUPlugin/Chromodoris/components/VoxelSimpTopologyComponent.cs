@@ -1,4 +1,5 @@
 using GHGPUPlugin.Chromodoris.Topology;
+using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
@@ -9,7 +10,7 @@ namespace GHGPUPlugin.Chromodoris
     /// <summary>
     /// Phase-1 SIMP: minimize linear compliance on a voxel hex mesh (no density filter yet).
     /// </summary>
-    /// <remarks>CPU-only SIMP / PCG; shipped as part of GHGPUPlugin (MetalGH).</remarks>
+    /// <remarks>SIMP / PCG with optional Metal MatVec; shipped as part of GHGPUPlugin (MetalGH).</remarks>
     public class VoxelSimpTopologyComponent : GH_Component
     {
         public VoxelSimpTopologyComponent()
@@ -40,6 +41,9 @@ namespace GHGPUPlugin.Chromodoris
             pManager.AddIntegerParameter("SolveStride", "Str",
                 "Coarse solve: 1 = full grid; 2+ = merge S×S×S fine cells (faster, upsampled ρ for iso).",
                 GH_ParamAccess.item, 2);
+            pManager.AddBooleanParameter("UseGPU", "GPU",
+                "Use Metal for PCG MatVec (stiffness × vector); CPU fallback if unavailable.", GH_ParamAccess.item, true);
+            pManager[16].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -57,6 +61,7 @@ namespace GHGPUPlugin.Chromodoris
             float[,,] inside = null, support = null, load = null;
             double vf = 0.3;
             int outer = 30, pcg = 800, maxEl = 40000, solveStride = 2;
+            bool useGpu = true;
             double simpP = 3, move = 0.2, emin = 1e-6, nu = 0.3;
             double fx = 0, fy = 0, fz = -1;
 
@@ -76,6 +81,8 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(13, ref fy);
             DA.GetData(14, ref fz);
             DA.GetData(15, ref solveStride);
+            DA.GetData(16, ref useGpu);
+            NativeLoader.EnsureLoaded();
 
             int nx = inside.GetLength(0), ny = inside.GetLength(1), nz = inside.GetLength(2);
             if (support.GetLength(0) != nx || load.GetLength(0) != nx)
@@ -118,7 +125,7 @@ namespace GHGPUPlugin.Chromodoris
             {
                 res = VoxelSimpOptimizer.Run(
                     inside, support, load, dx, dy, dz, force, vf,
-                    outer, pcg, simpP, move, emin, nu, maxEl, solveStride);
+                    outer, pcg, simpP, move, emin, nu, maxEl, solveStride, useGpu);
             }
             catch (Exception ex)
             {
