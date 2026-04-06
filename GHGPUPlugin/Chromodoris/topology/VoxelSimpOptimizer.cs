@@ -25,6 +25,10 @@ namespace GHGPUPlugin.Chromodoris.Topology
             public int PcgFallbackCode;    // last non-zero pcgCode, 0 if never failed
             public string DiagMessage;     // detailed diagnostic string
             public string GpuDiagPreSolve; // first-iteration snapshot of GPU inputs
+            /// <summary>Per-outer-iteration design variable x[e] before OC update; null if not recorded.</summary>
+            public List<double[]> DensityHistory;
+            /// <summary>Compliance f·u after each outer iteration linear solve.</summary>
+            public List<double> IterationCompliance = new List<double>();
         }
 
         public static Result Run(
@@ -42,7 +46,8 @@ namespace GHGPUPlugin.Chromodoris.Topology
             double nu,
             int maxElements,
             int solveStride,
-            bool useGpuMatVec = true)
+            bool useGpuMatVec = true,
+            bool recordHistory = false)
         {
             int nx = insideFine.GetLength(0);
             int ny = insideFine.GetLength(1);
@@ -51,7 +56,8 @@ namespace GHGPUPlugin.Chromodoris.Topology
             var res = new Result
             {
                 DensityPhys = new float[nx, ny, nz],
-                Message = ""
+                Message = "",
+                DensityHistory = recordHistory ? new List<double[]>() : null
             };
 
             string gpuFallbackMsg = null;
@@ -466,6 +472,14 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 }
 
                 res.Compliance = C;
+                res.IterationCompliance.Add(C);
+                if (recordHistory && res.DensityHistory != null)
+                {
+                    var rhoSnap = new double[nElem];
+                    Array.Copy(x, rhoSnap, nElem);
+                    res.DensityHistory.Add(rhoSnap);
+                }
+
                 OcUpdate(nElem, x, dc, passive, volTarget, moveLimit, 0.001, xNew);
 
                 double change = 0;

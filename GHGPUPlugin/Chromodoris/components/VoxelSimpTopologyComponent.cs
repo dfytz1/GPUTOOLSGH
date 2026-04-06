@@ -1,9 +1,11 @@
 using GHGPUPlugin.Chromodoris.Topology;
 using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using System;
+using System.Collections.Generic;
 
 namespace GHGPUPlugin.Chromodoris
 {
@@ -43,7 +45,10 @@ namespace GHGPUPlugin.Chromodoris
                 GH_ParamAccess.item, 2);
             pManager.AddBooleanParameter("UseGPU", "GPU",
                 "Use Metal for PCG MatVec (stiffness × vector); CPU fallback if unavailable.", GH_ParamAccess.item, true);
+            pManager.AddBooleanParameter("RecordHistory", "Rec",
+                "If true, append each outer iteration’s design ρ to DensityHistory (more memory).", GH_ParamAccess.item, false);
             pManager[16].Optional = true;
+            pManager[17].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -53,6 +58,11 @@ namespace GHGPUPlugin.Chromodoris
                 GH_ParamAccess.item);
             pManager.AddBoxParameter("BoundingBox", "B", "Passthrough for Build IsoSurface.", GH_ParamAccess.item);
             pManager.AddNumberParameter("Compliance", "C", "Last linear compliance f·u (relative units).", GH_ParamAccess.item);
+            pManager.AddNumberParameter("DensityHistory", "ρHist",
+                "SIMP design variable per element before each OC update; branch index = outer iteration when RecordHistory is true; empty otherwise.",
+                GH_ParamAccess.tree);
+            pManager.AddNumberParameter("IterationCompliance", "CIt",
+                "Compliance f·u after each outer iteration (convergence plot).", GH_ParamAccess.list);
         }
 
         protected override void SolveInstance(IGH_DataAccess DA)
@@ -64,6 +74,8 @@ namespace GHGPUPlugin.Chromodoris
                 DA.SetData(0, null);
                 DA.SetData(1, bbox);
                 DA.SetData(2, 0.0);
+                DA.SetDataTree(3, new GH_Structure<GH_Number>());
+                DA.SetDataList(4, new List<GH_Number>());
             }
 
             Box box = new Box();
@@ -71,6 +83,7 @@ namespace GHGPUPlugin.Chromodoris
             double vf = 0.3;
             int outer = 30, pcg = 800, maxEl = 40000, solveStride = 2;
             bool useGpu = true;
+            bool recordHistory = false;
             double simpP = 3, move = 0.2, emin = 1e-6, nu = 0.3;
             double fx = 0, fy = 0, fz = -1;
 
@@ -131,6 +144,7 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(14, ref fz);
             solveStride = ReadIntCoerce(DA, 15, solveStride);
             DA.GetData(16, ref useGpu);
+            DA.GetData(17, ref recordHistory);
 
             if (useGpu)
             {
@@ -198,7 +212,7 @@ namespace GHGPUPlugin.Chromodoris
             {
                 res = VoxelSimpOptimizer.Run(
                     inside, support, load, dx, dy, dz, force, vf,
-                    outer, pcg, simpP, move, emin, nu, maxEl, solveStride, useGpu);
+                    outer, pcg, simpP, move, emin, nu, maxEl, solveStride, useGpu, recordHistory);
             }
             catch (Exception ex)
             {
@@ -233,9 +247,27 @@ namespace GHGPUPlugin.Chromodoris
             if (!string.IsNullOrWhiteSpace(res.GpuDiagPreSolve))
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, res.GpuDiagPreSolve);
 
+            var histTree = new GH_Structure<GH_Number>();
+            if (res.DensityHistory != null)
+            {
+                for (int br = 0; br < res.DensityHistory.Count; br++)
+                {
+                    var path = new GH_Path(br);
+                    double[] row = res.DensityHistory[br];
+                    for (int e = 0; e < row.Length; e++)
+                        histTree.Append(new GH_Number(row[e]), path);
+                }
+            }
+
+            var cIt = new List<GH_Number>(res.IterationCompliance.Count);
+            foreach (double c in res.IterationCompliance)
+                cIt.Add(new GH_Number(c));
+
             DA.SetData(0, new GH_ObjectWrapper(res.DensityPhys));
             DA.SetData(1, box);
             DA.SetData(2, res.Compliance);
+            DA.SetDataTree(3, histTree);
+            DA.SetDataList(4, cIt);
         }
 
         public override GH_Exposure Exposure => GH_Exposure.quinary;
