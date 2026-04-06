@@ -384,6 +384,10 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     for (int k = 0; k <= nzf; k++)
                         fineNid[i, j, k] = -1;
 
+            var fineNodePos = new (int i, int j, int k)[fine.NNodes];
+            for (int q = 0; q < fine.NNodes; q++)
+                fineNodePos[q] = (-1, -1, -1);
+
             for (int e = 0; e < fine.NElem; e++)
             {
                 int i = fine.ExC[e], j = fine.EyC[e], k = fine.EzC[e];
@@ -395,7 +399,12 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 int[] J = { j, j, j + 1, j + 1, j, j, j + 1, j + 1 };
                 int[] K = { k, k, k, k, k + 1, k + 1, k + 1, k + 1 };
                 for (int n = 0; n < 8; n++)
-                    fineNid[I[n], J[n], K[n]] = cn[n];
+                {
+                    int gi = I[n], gj = J[n], gk = K[n];
+                    int nid = cn[n];
+                    fineNid[gi, gj, gk] = nid;
+                    fineNodePos[nid] = (gi, gj, gk);
+                }
             }
 
             var coarseNid = new int[nxc + 1, nyc + 1, nzc + 1];
@@ -425,11 +434,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             for (int fn = 0; fn < fine.NNodes; fn++)
             {
-                int If = -1, Jf = -1, Kf = -1;
-                for (int i = 0; i <= nxf && If < 0; i++)
-                    for (int j = 0; j <= nyf && If < 0; j++)
-                        for (int k = 0; k <= nzf && If < 0; k++)
-                            if (fineNid[i, j, k] == fn) { If = i; Jf = j; Kf = k; }
+                var (If, Jf, Kf) = fineNodePos[fn];
                 if (If < 0) continue;
 
                 double uc = If * 0.5;
