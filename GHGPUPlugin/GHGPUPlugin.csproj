@@ -21,6 +21,20 @@
     <None Include="..\MetalBridge\Kernels\default.metallib" Link="default.metallib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\Kernels\default.metallib')" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Chromodoris\Resources\sample.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.sample.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\samplecustom.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.samplecustom.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\isosurface.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.isosurface.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\isosurface_sl.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.isosurface_sl.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\laplace_proximity.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.laplace_proximity.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\closevolume.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.closevolume.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\smooth.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.smooth.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\smooth_masked.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.smooth_masked.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\laplace_field.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.laplace_field.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\voxel_design_domain.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.voxel_design_domain.png" />
+    <EmbeddedResource Include="Chromodoris\Resources\paint_regions.png" LogicalName="GHGPUPlugin.Chromodoris.Resources.paint_regions.png" />
+  </ItemGroup>
+
   <!-- Copy build outputs into Rhino 8 Grasshopper Libraries after every build (macOS). -->
   <Target Name="DeployToGrasshopperLibraries" AfterTargets="Build">
     <PropertyGroup>

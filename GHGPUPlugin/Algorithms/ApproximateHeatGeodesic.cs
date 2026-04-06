@@ -5,10 +5,10 @@ using Rhino.Geometry;
 
 namespace GHGPUPlugin.Algorithms;
 
-/// <summary>Approximate geodesic distance via heat diffusion + gradient/divergence + Laplacian smoothing (not a full FEM solve).</summary>
+/// <summary>Heat-method geodesic: diffuse u, unit-gradient divergence, then Jacobi/SOR on ∇²φ = div (approximate Poisson).</summary>
 public static class ApproximateHeatGeodesic
 {
-    private const int HeatIterations = 20;
+    private const int HeatIterations = 60;
     private const float HeatStrength = 0.5f;
 
     public static bool TryCompute(
@@ -49,20 +49,20 @@ public static class ApproximateHeatGeodesic
         var x = new float[nTopo];
         var y = new float[nTopo];
         var z = new float[nTopo];
-        for (int i = 0; i < nTopo; i++)
-            x[i] = y[i] = z[i] = heatTopo[i];
 
-        // One Laplacian iteration per submit so seed vertices can be pinned to 1f on the CPU between steps.
-        // (A batched GPU kernel with in-kernel pinning would avoid P/Invoke overhead — see Metal bridge notes.)
         IntPtr heatCtx = IntPtr.Zero;
         bool heatGpu = useGpu && NativeLoader.IsMetalAvailable && MetalSharedContext.TryGetContext(out heatCtx);
         var heatOpts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
         double heatStrengthD = HeatStrength;
+
         for (int it = 0; it < HeatIterations; it++)
         {
             bool iterGpu = false;
             if (heatGpu)
             {
+                for (int i = 0; i < nTopo; i++)
+                    x[i] = y[i] = z[i] = heatTopo[i];
+
                 int code = MetalBridge.RunLaplacianIterations(
                     heatCtx,
                     x,
@@ -77,12 +77,17 @@ public static class ApproximateHeatGeodesic
             }
 
             if (!iterGpu)
-                UmbrellaScalar3(x, y, z, neighbors, heatStrengthD, heatOpts);
+                UmbrellaScalar1(heatTopo, neighbors, heatStrengthD, heatOpts);
+            else
+            {
+                for (int i = 0; i < nTopo; i++)
+                    heatTopo[i] = x[i];
+            }
 
             for (int si = 0; si < nTopo; si++)
             {
                 if (seedTopo[si])
-                    x[si] = y[si] = z[si] = 1f;
+                    heatTopo[si] = 1f;
             }
         }
 
@@ -90,66 +95,100 @@ public static class ApproximateHeatGeodesic
         for (int mv = 0; mv < vc; mv++)
         {
             int ti = tv.TopologyVertexIndex(mv);
-            uMesh[mv] = x[ti];
+            uMesh[mv] = heatTopo[ti];
         }
 
         var divTopo = new double[nTopo];
         AccumulateDivergence(mesh, uMesh, divTopo);
 
-        for (int i = 0; i < nTopo; i++)
-        {
-            x[i] = y[i] = z[i] = (float)divTopo[i];
-        }
-
-        for (int si = 0; si < nTopo; si++)
-        {
-            if (seedTopo[si])
-                x[si] = y[si] = z[si] = 0f;
-        }
-
-        float strF = (float)strength;
         if (iterations < 1)
             iterations = 1;
 
-        IntPtr distCtx = IntPtr.Zero;
-        bool distGpu = useGpu && NativeLoader.IsMetalAvailable && MetalSharedContext.TryGetContext(out distCtx);
-        var distOpts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
+        var phi = new double[nTopo];
+        var phiNew = new double[nTopo];
+        var jacobiOpts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
         for (int it = 0; it < iterations; it++)
         {
-            bool iterGpu = false;
-            if (distGpu)
-            {
-                int code = MetalBridge.RunLaplacianIterations(
-                    distCtx,
-                    x,
-                    y,
-                    z,
-                    adjFlat,
-                    rowOffsets,
-                    nTopo,
-                    strF,
-                    1);
-                iterGpu = code == 0;
-            }
+            JacobiStep(phi, phiNew, divTopo, neighbors, strength, jacobiOpts);
+            (phi, phiNew) = (phiNew, phi);
+        }
 
-            if (!iterGpu)
-                UmbrellaScalar3(x, y, z, neighbors, strength, distOpts);
+        double seedMean = 0;
+        int seedCount = 0;
+        for (int i = 0; i < nTopo; i++)
+        {
+            if (!seedTopo[i])
+                continue;
+            seedMean += phi[i];
+            seedCount++;
+        }
 
-            for (int si = 0; si < nTopo; si++)
-            {
-                if (seedTopo[si])
-                    x[si] = y[si] = z[si] = 0f;
-            }
+        if (seedCount > 0)
+            seedMean /= seedCount;
+
+        for (int i = 0; i < nTopo; i++)
+        {
+            phi[i] -= seedMean;
+            if (phi[i] < 0)
+                phi[i] = 0;
         }
 
         distancePerMeshVertex = new double[vc];
         for (int mv = 0; mv < vc; mv++)
         {
             int ti = tv.TopologyVertexIndex(mv);
-            distancePerMeshVertex[mv] = seedTopo[ti] ? 0.0 : x[ti];
+            distancePerMeshVertex[mv] = phi[ti];
         }
 
         return true;
+    }
+
+    private static void UmbrellaScalar1(float[] u, int[][] neighbors, double strength, ParallelOptions opts)
+    {
+        int n = u.Length;
+        var nu = new float[n];
+        Parallel.For(0, n, opts, i =>
+        {
+            int[] nb = neighbors[i];
+            if (nb.Length == 0)
+            {
+                nu[i] = u[i];
+                return;
+            }
+
+            double s = 0;
+            for (int k = 0; k < nb.Length; k++)
+                s += u[nb[k]];
+            s /= nb.Length;
+            nu[i] = (float)(u[i] + strength * (s - u[i]));
+        });
+        Array.Copy(nu, u, n);
+    }
+
+    private static void JacobiStep(
+        double[] phi,
+        double[] phiNew,
+        double[] rhs,
+        int[][] neighbors,
+        double strength,
+        ParallelOptions opts)
+    {
+        int n = phi.Length;
+        Parallel.For(0, n, opts, i =>
+        {
+            int[] nb = neighbors[i];
+            if (nb.Length == 0)
+            {
+                phiNew[i] = phi[i];
+                return;
+            }
+
+            double sum = 0;
+            for (int k = 0; k < nb.Length; k++)
+                sum += phi[nb[k]];
+            double target = (sum - rhs[i]) / nb.Length;
+            phiNew[i] = phi[i] + strength * (target - phi[i]);
+        });
     }
 
     private static void UmbrellaScalar3(float[] x, float[] y, float[] z, int[][] neighbors, double strength, ParallelOptions opts)
