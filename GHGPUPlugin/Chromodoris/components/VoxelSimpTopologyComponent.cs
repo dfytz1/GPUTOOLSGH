@@ -19,6 +19,7 @@ namespace GHGPUPlugin.Chromodoris
         private string _errorMsg = null;
         private bool _running = false;
         private Box _cachedBox;
+        private int _solveLaunchId;
 
         public VoxelSimpTopologyComponent()
           : base("Voxel SIMP Topology GPU", "VoxelSIMPGPU",
@@ -50,7 +51,10 @@ namespace GHGPUPlugin.Chromodoris
                 GH_ParamAccess.item, 2);
             pManager.AddBooleanParameter("UseGPU", "GPU",
                 "Use Metal for PCG MatVec (stiffness × vector); CPU fallback if unavailable.", GH_ParamAccess.item, true);
+            pManager.AddIntegerParameter("TimeoutSeconds", "T",
+                "Max seconds to wait for solver before aborting (0 = no timeout).", GH_ParamAccess.item, 120);
             pManager[16].Optional = true;
+            pManager[17].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -107,6 +111,7 @@ namespace GHGPUPlugin.Chromodoris
             double vf = 0.3;
             int outer = 30, pcg = 800, maxEl = 40000, solveStride = 2;
             bool useGpu = true;
+            int timeoutSec = 120;
             double simpP = 3, move = 0.2, emin = 1e-6, nu = 0.3;
             double fx = 0, fy = 0, fz = -1;
 
@@ -127,6 +132,7 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(14, ref fz);
             DA.GetData(15, ref solveStride);
             DA.GetData(16, ref useGpu);
+            DA.GetData(17, ref timeoutSec);
             NativeLoader.EnsureLoaded();
 
             int nx = inside.GetLength(0), ny = inside.GetLength(1), nz = inside.GetLength(2);
@@ -177,6 +183,8 @@ namespace GHGPUPlugin.Chromodoris
             int outerCap = outer, pcgCap = pcg, maxElCap = maxEl, solveStrideCap = solveStride;
             bool useGpuCap = useGpu;
             double simpPCap = simpP, moveCap = move, eminCap = emin, nuCap = nu;
+            int timeoutSecCap = timeoutSec;
+            int launchId = ++_solveLaunchId;
 
             _task = Task.Run(() =>
             {
@@ -195,6 +203,21 @@ namespace GHGPUPlugin.Chromodoris
                     Rhino.RhinoApp.InvokeOnUiThread((Action)(() => ExpireSolution(true)));
                 }
             });
+
+            if (timeoutSecCap > 0)
+            {
+                int capturedLaunch = launchId;
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(timeoutSecCap * 1000).ConfigureAwait(false);
+                    if (_running && capturedLaunch == _solveLaunchId)
+                    {
+                        _errorMsg = $"Solver timed out after {timeoutSecCap}s. Try UseGPU=false or raise SolveStride.";
+                        _running = false;
+                        Rhino.RhinoApp.InvokeOnUiThread((Action)(() => ExpireSolution(true)));
+                    }
+                });
+            }
 
             AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "Solving in background…");
             return;

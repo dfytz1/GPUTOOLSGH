@@ -307,7 +307,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 mgLevels = new List<MgLevel>();
             res.MgLevelCount = mgLevels.Count;
 
-            bool canUseMgpcg = useGpu && mgLevels.Count >= 2;
+            bool canUseMgpcg = useGpu && mgLevels.Count >= 2 && useGpuMatVec;
             double[][]? mgRhoArrays = null;
             if (canUseMgpcg)
             {
@@ -427,61 +427,73 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     if (canUseMgpcg && mgRhoArrays != null && mgRhoFloatsPinned != null && mgRhoPtrsPinned != null
                         && fGpu != null && uGpu != null && mgPinned != null)
                     {
-                        for (int l = 0; l < mgLevels.Count; l++)
+                        try
                         {
-                            var rf = mgRhoFloatsPinned[l];
-                            for (int e = 0; e < mgLevels[l].NElem; e++)
-                                rf[e] = (float)mgRhoArrays[l][e];
-                        }
+                            for (int l = 0; l < mgLevels.Count; l++)
+                            {
+                                var rf = mgRhoFloatsPinned[l];
+                                for (int e = 0; e < mgLevels[l].NElem; e++)
+                                    rf[e] = (float)mgRhoArrays[l][e];
+                            }
 
-                        for (int i = 0; i < ndof; i++)
-                        {
-                            fGpu[i] = (float)f[i];
-                            uGpu[i] = (float)u[i];
-                        }
-
-                        int mgCode = MetalBridge.FemMgPcgSolve(
-                            gpuCtx,
-                            mgPinned.KeUnique, mgPinned.KeIdx, mgPinned.DofMap, mgPinned.Diag, mgPinned.Fixed,
-                            mgPinned.Prolong, mgPinned.ProlongW,
-                            mgRhoPtrsPinned,
-                            mgPinned.NElem, mgPinned.NDof, mgPinned.NumUnique,
-                            mgLevels.Count,
-                            fGpu, uGpu,
-                            maxPcgIter, (float)tolRel,
-                            nSmooth: 2, omegaJacobi: 0.67f,
-                            out mgPcgIters);
-
-                        if (mgCode == 0)
-                        {
                             for (int i = 0; i < ndof; i++)
-                                u[i] = uGpu[i];
-                            solvedGpuPcg = true;
-                            solvedMgPcg = true;
+                            {
+                                fGpu[i] = (float)f[i];
+                                uGpu[i] = (float)u[i];
+                            }
+
+                            int mgCode = MetalBridge.FemMgPcgSolve(
+                                gpuCtx,
+                                mgPinned.KeUnique, mgPinned.KeIdx, mgPinned.DofMap, mgPinned.Diag, mgPinned.Fixed,
+                                mgPinned.Prolong, mgPinned.ProlongW,
+                                mgRhoPtrsPinned,
+                                mgPinned.NElem, mgPinned.NDof, mgPinned.NumUnique,
+                                mgLevels.Count,
+                                fGpu, uGpu,
+                                maxPcgIter, (float)tolRel,
+                                nSmooth: 2, omegaJacobi: 0.67f,
+                                out mgPcgIters);
+
+                            if (mgCode == 0)
+                            {
+                                for (int i = 0; i < ndof; i++)
+                                    u[i] = uGpu[i];
+                                solvedGpuPcg = true;
+                                solvedMgPcg = true;
+                            }
+                        }
+                        catch (Exception)
+                        {
                         }
                     }
 
                     if (!solvedGpuPcg && useGpu && gpuCtx != IntPtr.Zero && Ke_flat != null && dofMapFlat != null && rhoFlat != null
                         && fixedBytes != null && fGpu != null && uGpu != null && diagGpu != null)
                     {
-                        for (int e2 = 0; e2 < nElem; e2++)
-                            rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
-                        for (int i = 0; i < ndof; i++)
+                        try
                         {
-                            fGpu[i] = (float)f[i];
-                            uGpu[i] = (float)u[i];
-                            diagGpu[i] = (float)diag[i];
-                        }
-
-                        int pcgCode = MetalBridge.FemPcgSolve(
-                            gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
-                            (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
-
-                        if (pcgCode == 0)
-                        {
+                            for (int e2 = 0; e2 < nElem; e2++)
+                                rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
                             for (int i = 0; i < ndof; i++)
-                                u[i] = uGpu[i];
-                            solvedGpuPcg = true;
+                            {
+                                fGpu[i] = (float)f[i];
+                                uGpu[i] = (float)u[i];
+                                diagGpu[i] = (float)diag[i];
+                            }
+
+                            int pcgCode = MetalBridge.FemPcgSolve(
+                                gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
+                                (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
+
+                            if (pcgCode == 0)
+                            {
+                                for (int i = 0; i < ndof; i++)
+                                    u[i] = uGpu[i];
+                                solvedGpuPcg = true;
+                            }
+                        }
+                        catch (Exception)
+                        {
                         }
                     }
 
