@@ -96,17 +96,33 @@ namespace GHGPUPlugin.Chromodoris
                 return;
             }
             DA.GetData(4, ref vf);
-            DA.GetData(5, ref outer);
-            DA.GetData(6, ref pcg);
+            {
+                double tmp = outer;
+                DA.GetData(5, ref tmp);
+                outer = (int)Math.Round(tmp);
+            }
+            {
+                double tmp = pcg;
+                DA.GetData(6, ref tmp);
+                pcg = (int)Math.Round(tmp);
+            }
             DA.GetData(7, ref simpP);
             DA.GetData(8, ref move);
             DA.GetData(9, ref emin);
             DA.GetData(10, ref nu);
-            DA.GetData(11, ref maxEl);
+            {
+                double tmp = maxEl;
+                DA.GetData(11, ref tmp);
+                maxEl = (int)Math.Round(tmp);
+            }
             DA.GetData(12, ref fx);
             DA.GetData(13, ref fy);
             DA.GetData(14, ref fz);
-            DA.GetData(15, ref solveStride);
+            {
+                double tmp = solveStride;
+                DA.GetData(15, ref tmp);
+                solveStride = (int)Math.Round(tmp);
+            }
             DA.GetData(16, ref useGpu);
 
             if (useGpu)
