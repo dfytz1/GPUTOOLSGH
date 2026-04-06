@@ -57,6 +57,11 @@ namespace GHGPUPlugin.Chromodoris
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
+            // Satisfy all outputs before any early return so downstream wires do not stay stale.
+            DA.SetData(0, null);
+            DA.SetData(1, new Box());
+            DA.SetData(2, 0.0);
+
             Box box = new Box();
             float[,,] inside = null, support = null, load = null;
             double vf = 0.3;
@@ -65,10 +70,16 @@ namespace GHGPUPlugin.Chromodoris
             double simpP = 3, move = 0.2, emin = 1e-6, nu = 0.3;
             double fx = 0, fy = 0, fz = -1;
 
-            if (!DA.GetData(0, ref box)) return;
-            if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 1, this, out inside, "InsideMask")) return;
-            if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 2, this, out support, "SupportMask")) return;
-            if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 3, this, out load, "LoadMask")) return;
+            if (!DA.GetData(0, ref box))
+                return;
+            DA.SetData(1, box);
+
+            if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 1, this, out inside, "InsideMask"))
+                return;
+            if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 2, this, out support, "SupportMask"))
+                return;
+            if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 3, this, out load, "LoadMask"))
+                return;
             DA.GetData(4, ref vf);
             DA.GetData(5, ref outer);
             DA.GetData(6, ref pcg);
@@ -82,7 +93,26 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(14, ref fz);
             DA.GetData(15, ref solveStride);
             DA.GetData(16, ref useGpu);
-            NativeLoader.EnsureLoaded();
+
+            if (useGpu)
+            {
+                try
+                {
+                    NativeLoader.EnsureLoaded();
+                    if (!NativeLoader.IsMetalAvailable)
+                    {
+                        useGpu = false;
+                        AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                            "GPU native library unavailable, using CPU: " + (NativeLoader.LoadError ?? "MetalBridge.dylib not loaded."));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    useGpu = false;
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                        "GPU native library unavailable, using CPU: " + ex.Message);
+                }
+            }
 
             int nx = inside.GetLength(0), ny = inside.GetLength(1), nz = inside.GetLength(2);
             if (support.GetLength(0) != nx || load.GetLength(0) != nx)

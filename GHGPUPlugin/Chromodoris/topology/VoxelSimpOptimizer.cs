@@ -265,7 +265,19 @@ namespace GHGPUPlugin.Chromodoris.Topology
             double eminClamped = Math.Max(1e-9, Math.Min(emin, 0.5));
 
             IntPtr gpuCtx = IntPtr.Zero;
-            bool useGpu = useGpuMatVec && MetalSharedContext.TryGetContext(out gpuCtx);
+            bool useGpu = false;
+            if (useGpuMatVec)
+            {
+                try
+                {
+                    useGpu = MetalSharedContext.TryGetContext(out gpuCtx);
+                }
+                catch
+                {
+                    useGpu = false;
+                    gpuCtx = IntPtr.Zero;
+                }
+            }
             float[] Ke_flat = null;
             int[] dofMapFlat = null;
             float[] rhoFlat = null;
@@ -304,22 +316,30 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             Action<double[], double[]> matVecFn = (vecIn, vecOut) =>
             {
-                if (useGpu && Ke_flat != null && dofMapFlat != null && rhoFlat != null && vFlat != null && AvFlat != null)
+                if (useGpu && Ke_flat != null && dofMapFlat != null && rhoFlat != null && vFlat != null && AvFlat != null
+                    && fixedBytes != null)
                 {
-                    for (int e = 0; e < nElem; e++)
-                        rhoFlat[e] = (float)StiffnessInterp(x[e], passive[e], eminClamped, simpP);
-                    for (int i = 0; i < ndof; i++)
-                        vFlat[i] = (float)vecIn[i];
-
-                    int code = MetalBridge.FemMatVec(
-                        gpuCtx, Ke_flat, dofMapFlat, rhoFlat, vFlat, AvFlat,
-                        fixedBytes, (float)Penalty, nElem, ndof);
-
-                    if (code == 0)
+                    try
                     {
+                        for (int e = 0; e < nElem; e++)
+                            rhoFlat[e] = (float)StiffnessInterp(x[e], passive[e], eminClamped, simpP);
                         for (int i = 0; i < ndof; i++)
-                            vecOut[i] = AvFlat[i];
-                        return;
+                            vFlat[i] = (float)vecIn[i];
+
+                        int code = MetalBridge.FemMatVec(
+                            gpuCtx, Ke_flat, dofMapFlat, rhoFlat, vFlat, AvFlat,
+                            fixedBytes, (float)Penalty, nElem, ndof);
+
+                        if (code == 0)
+                        {
+                            for (int i = 0; i < ndof; i++)
+                                vecOut[i] = AvFlat[i];
+                            return;
+                        }
+                    }
+                    catch
+                    {
+                        // Fall through to CPU MatVec.
                     }
                 }
 
@@ -339,24 +359,31 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 if (useGpu && gpuCtx != IntPtr.Zero && Ke_flat != null && dofMapFlat != null && rhoFlat != null
                     && fixedBytes != null && fGpu != null && uGpu != null && diagGpu != null)
                 {
-                    for (int e2 = 0; e2 < nElem; e2++)
-                        rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
-                    for (int i = 0; i < ndof; i++)
+                    try
                     {
-                        fGpu[i] = (float)f[i];
-                        uGpu[i] = (float)u[i];
-                        diagGpu[i] = (float)diag[i];
-                    }
-
-                    int pcgCode = MetalBridge.FemPcgSolve(
-                        gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
-                        (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
-
-                    if (pcgCode == 0)
-                    {
+                        for (int e2 = 0; e2 < nElem; e2++)
+                            rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
                         for (int i = 0; i < ndof; i++)
-                            u[i] = uGpu[i];
-                        solvedGpuPcg = true;
+                        {
+                            fGpu[i] = (float)f[i];
+                            uGpu[i] = (float)u[i];
+                            diagGpu[i] = (float)diag[i];
+                        }
+
+                        int pcgCode = MetalBridge.FemPcgSolve(
+                            gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
+                            (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
+
+                        if (pcgCode == 0)
+                        {
+                            for (int i = 0; i < ndof; i++)
+                                u[i] = uGpu[i];
+                            solvedGpuPcg = true;
+                        }
+                    }
+                    catch
+                    {
+                        solvedGpuPcg = false;
                     }
                 }
 
