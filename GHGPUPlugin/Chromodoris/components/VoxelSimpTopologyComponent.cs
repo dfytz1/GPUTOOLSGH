@@ -57,10 +57,14 @@ namespace GHGPUPlugin.Chromodoris
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            // Satisfy all outputs before any early return so downstream wires do not stay stale.
-            DA.SetData(0, null);
-            DA.SetData(1, new Box());
-            DA.SetData(2, 0.0);
+            // Do not call DA.SetData before reading inputs — that can break Grasshopper's solution
+            // propagation (inputs appear dead, especially on GPU solves). Set safe outputs only on exits.
+            void FallbackOutputs(Box bbox)
+            {
+                DA.SetData(0, null);
+                DA.SetData(1, bbox);
+                DA.SetData(2, 0.0);
+            }
 
             Box box = new Box();
             float[,,] inside = null, support = null, load = null;
@@ -71,15 +75,26 @@ namespace GHGPUPlugin.Chromodoris
             double fx = 0, fy = 0, fz = -1;
 
             if (!DA.GetData(0, ref box))
+            {
+                FallbackOutputs(new Box());
                 return;
-            DA.SetData(1, box);
+            }
 
             if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 1, this, out inside, "InsideMask"))
+            {
+                FallbackOutputs(box);
                 return;
+            }
             if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 2, this, out support, "SupportMask"))
+            {
+                FallbackOutputs(box);
                 return;
+            }
             if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 3, this, out load, "LoadMask"))
+            {
+                FallbackOutputs(box);
                 return;
+            }
             DA.GetData(4, ref vf);
             DA.GetData(5, ref outer);
             DA.GetData(6, ref pcg);
@@ -118,24 +133,28 @@ namespace GHGPUPlugin.Chromodoris
             if (support.GetLength(0) != nx || load.GetLength(0) != nx)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Mask dimensions must match.");
+                FallbackOutputs(box);
                 return;
             }
 
             if (vf <= 0 || vf > 1)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "VolumeFraction must be in (0,1].");
+                FallbackOutputs(box);
                 return;
             }
 
             if (outer < 1 || pcg < 10)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Invalid iteration counts.");
+                FallbackOutputs(box);
                 return;
             }
 
             if (solveStride < 1)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "SolveStride must be >= 1.");
+                FallbackOutputs(box);
                 return;
             }
 
@@ -147,6 +166,7 @@ namespace GHGPUPlugin.Chromodoris
             if (force.Length < 1e-20)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Force vector is (near) zero.");
+                FallbackOutputs(box);
                 return;
             }
 
@@ -160,12 +180,14 @@ namespace GHGPUPlugin.Chromodoris
             catch (Exception ex)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, ex.Message);
+                FallbackOutputs(box);
                 return;
             }
 
             if (res.Message != "OK")
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, res.Message);
+                FallbackOutputs(box);
                 return;
             }
 
