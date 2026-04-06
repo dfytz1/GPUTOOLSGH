@@ -1201,7 +1201,7 @@ static void MbEncodeDotXY(MBContext* mb, id<MTLComputeCommandEncoder> enc, id<MT
     [enc setBuffer:mb->pcgPartials offset:0 atIndex:2];
     [enc setBuffer:mb->femNDof offset:0 atIndex:3];
     const NSUInteger nGrp = (static_cast<NSUInteger>(ndof) + kTpg - 1u) / kTpg;
-    [enc dispatchThreads:MTLSizeMake(nGrp * kTpg, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake(nGrp, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
 
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
@@ -1216,7 +1216,7 @@ static void MbEncodeDotXY(MBContext* mb, id<MTLComputeCommandEncoder> enc, id<MT
         [enc setBuffer:curOut offset:0 atIndex:1];
         [enc setBuffer:mb->pcgReduceCount offset:0 atIndex:2];
         const NSUInteger nOut = (static_cast<NSUInteger>(nCur) + kTpg - 1u) / kTpg;
-        [enc dispatchThreads:MTLSizeMake(nOut * kTpg, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
+        [enc dispatchThreadgroups:MTLSizeMake(nOut, 1, 1) threadsPerThreadgroup:MTLSizeMake(kTpg, 1, 1)];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         nCur = static_cast<int>(nOut);
         id<MTLBuffer> t = curIn;
