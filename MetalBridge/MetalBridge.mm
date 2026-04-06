@@ -1,6 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <algorithm>
+#include <cstring>
 #include <dlfcn.h>
+#include <vector>
 
 #include "MetalBridge.h"
 
@@ -13,8 +16,10 @@ struct MBContext {
     id<MTLComputePipelineState> laplacianPso = nil;
     id<MTLComputePipelineState> closestPso = nil;
     id<MTLComputePipelineState> closestCloudPso = nil;
-    id<MTLComputePipelineState> delaunayMarkPso = nil;
     id<MTLComputePipelineState> meshEdgesPso = nil;
+    id<MTLComputePipelineState> jfaInitPso = nil;
+    id<MTLComputePipelineState> jfaStepPso = nil;
+    id<MTLComputePipelineState> jfaEdgePso = nil;
 
     // Laplacian: reuse GPU memory across iterations (topology size must match).
     id<MTLBuffer> lapBxIn = nil;
@@ -29,7 +34,62 @@ struct MBContext {
     id<MTLBuffer> lapStr = nil;
     int lapCachedVertexCount = -1;
     int lapCachedNnz = -1;
+
+    // Closest-point mesh cache
+    id<MTLBuffer> cpMeshVx = nil;
+    id<MTLBuffer> cpMeshVy = nil;
+    id<MTLBuffer> cpMeshVz = nil;
+    id<MTLBuffer> cpMeshTri = nil;
+    id<MTLBuffer> cpMeshQx = nil;
+    id<MTLBuffer> cpMeshQy = nil;
+    id<MTLBuffer> cpMeshQz = nil;
+    id<MTLBuffer> cpMeshQc = nil;
+    id<MTLBuffer> cpMeshTc = nil;
+    id<MTLBuffer> cpMeshOutX = nil;
+    id<MTLBuffer> cpMeshOutY = nil;
+    id<MTLBuffer> cpMeshOutZ = nil;
+    id<MTLBuffer> cpMeshOutD = nil;
+    id<MTLBuffer> cpMeshOutI = nil;
+    int cpMeshCachedVertexCount = -1;
+    int cpMeshCachedTriCount = -1;
+    int cpMeshCachedQueryCount = -1;
+
+    // Closest-point cloud cache
+    id<MTLBuffer> cpCloudPx = nil;
+    id<MTLBuffer> cpCloudPy = nil;
+    id<MTLBuffer> cpCloudPz = nil;
+    id<MTLBuffer> cpCloudQx = nil;
+    id<MTLBuffer> cpCloudQy = nil;
+    id<MTLBuffer> cpCloudQz = nil;
+    id<MTLBuffer> cpCloudQc = nil;
+    id<MTLBuffer> cpCloudTc = nil;
+    id<MTLBuffer> cpCloudOutX = nil;
+    id<MTLBuffer> cpCloudOutY = nil;
+    id<MTLBuffer> cpCloudOutZ = nil;
+    id<MTLBuffer> cpCloudOutD = nil;
+    id<MTLBuffer> cpCloudOutI = nil;
+    int cpCloudCachedTargetCount = -1;
+    int cpCloudCachedQueryCount = -1;
 };
+
+void ReleaseCpMeshCache(MBContext* mb)
+{
+    mb->cpMeshVx = mb->cpMeshVy = mb->cpMeshVz = nil;
+    mb->cpMeshTri = nil;
+    mb->cpMeshQx = mb->cpMeshQy = mb->cpMeshQz = nil;
+    mb->cpMeshQc = mb->cpMeshTc = nil;
+    mb->cpMeshOutX = mb->cpMeshOutY = mb->cpMeshOutZ = mb->cpMeshOutD = mb->cpMeshOutI = nil;
+    mb->cpMeshCachedVertexCount = mb->cpMeshCachedTriCount = mb->cpMeshCachedQueryCount = -1;
+}
+
+void ReleaseCpCloudCache(MBContext* mb)
+{
+    mb->cpCloudPx = mb->cpCloudPy = mb->cpCloudPz = nil;
+    mb->cpCloudQx = mb->cpCloudQy = mb->cpCloudQz = nil;
+    mb->cpCloudQc = mb->cpCloudTc = nil;
+    mb->cpCloudOutX = mb->cpCloudOutY = mb->cpCloudOutZ = mb->cpCloudOutD = mb->cpCloudOutI = nil;
+    mb->cpCloudCachedTargetCount = mb->cpCloudCachedQueryCount = -1;
+}
 
 NSString* MetallibPathBesideDylib()
 {
@@ -82,9 +142,11 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> lap = MakePso(device, library, @"laplacianSmoothKernel", &err);
         id<MTLComputePipelineState> cls = MakePso(device, library, @"closestPointMeshKernel", &err);
         id<MTLComputePipelineState> cld = MakePso(device, library, @"closestPointCloudKernel", &err);
-        id<MTLComputePipelineState> del = MakePso(device, library, @"delaunayMarkBadTrisKernel", &err);
         id<MTLComputePipelineState> edg = MakePso(device, library, @"csrDirectedWeightedEdgesKernel", &err);
-        if (bench == nil || lap == nil || cls == nil || cld == nil || del == nil || edg == nil)
+        id<MTLComputePipelineState> jfaI = MakePso(device, library, @"jfaInitKernel", &err);
+        id<MTLComputePipelineState> jfaS = MakePso(device, library, @"jfaStepKernel", &err);
+        id<MTLComputePipelineState> jfaE = MakePso(device, library, @"jfaExtractEdgesKernel", &err);
+        if (bench == nil || lap == nil || cls == nil || cld == nil || edg == nil || jfaI == nil || jfaS == nil || jfaE == nil)
             return -5;
 
         id<MTLCommandQueue> queue = [device newCommandQueue];
@@ -98,8 +160,10 @@ int mb_create_context(void** outCtx)
         ctx->laplacianPso = lap;
         ctx->closestPso = cls;
         ctx->closestCloudPso = cld;
-        ctx->delaunayMarkPso = del;
         ctx->meshEdgesPso = edg;
+        ctx->jfaInitPso = jfaI;
+        ctx->jfaStepPso = jfaS;
+        ctx->jfaEdgePso = jfaE;
         *outCtx = ctx;
         return 0;
     }
@@ -114,12 +178,16 @@ void mb_destroy_context(void* ctx)
     mb->laplacianPso = nil;
     mb->closestPso = nil;
     mb->closestCloudPso = nil;
-    mb->delaunayMarkPso = nil;
     mb->meshEdgesPso = nil;
+    mb->jfaInitPso = nil;
+    mb->jfaStepPso = nil;
+    mb->jfaEdgePso = nil;
     mb->lapBxIn = mb->lapByIn = mb->lapBzIn = nil;
     mb->lapBxOut = mb->lapByOut = mb->lapBzOut = nil;
     mb->lapAdj = mb->lapOff = mb->lapVc = mb->lapStr = nil;
     mb->lapCachedVertexCount = mb->lapCachedNnz = -1;
+    ReleaseCpMeshCache(mb);
+    ReleaseCpCloudCache(mb);
     mb->queue = nil;
     mb->device = nil;
     delete mb;
@@ -142,16 +210,14 @@ int mb_run_benchmark(void* ctx, float* buffer, int elementCount, int innerIters,
     memcpy([dataBuf contents], buffer, byteLen);
 
     int params[2] = { elementCount, innerIters };
-    id<MTLBuffer> paramBuf = [mb->device newBufferWithBytes:params
-                                                     length:sizeof(params)
-                                                    options:opts];
+    id<MTLBuffer> paramBuf = [mb->device newBufferWithBytes:params length:sizeof(params) options:opts];
     if (paramBuf == nil)
         return -13;
 
     id<MTLComputePipelineState> pso = mb->benchmarkPso;
     const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
     const NSUInteger threadCount = static_cast<NSUInteger>(elementCount);
-    const NSUInteger tpg = MIN(maxTpg, MAX(threadCount, 1UL));
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
 
     @autoreleasepool {
         for (int o = 0; o < outerIters; o++) {
@@ -166,8 +232,7 @@ int mb_run_benchmark(void* ctx, float* buffer, int elementCount, int innerIters,
             [enc setComputePipelineState:pso];
             [enc setBuffer:dataBuf offset:0 atIndex:0];
             [enc setBuffer:paramBuf offset:0 atIndex:1];
-            [enc dispatchThreads:MTLSizeMake(threadCount, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc dispatchThreads:MTLSizeMake(threadCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
             [enc endEncoding];
             [cmd commit];
             [cmd waitUntilCompleted];
@@ -244,7 +309,7 @@ int mb_run_laplacian(
 
     id<MTLComputePipelineState> pso = mb->laplacianPso;
     const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, MAX(v, 1UL));
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
@@ -345,7 +410,7 @@ int mb_run_laplacian_iterations(
 
     id<MTLComputePipelineState> pso = mb->laplacianPso;
     const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, MAX(v, 1UL));
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
@@ -429,28 +494,51 @@ int mb_closest_points_mesh(
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
 
-    id<MTLBuffer> bqx = [mb->device newBufferWithBytes:qx length:qbytes options:opts];
-    id<MTLBuffer> bqy = [mb->device newBufferWithBytes:qy length:qbytes options:opts];
-    id<MTLBuffer> bqz = [mb->device newBufferWithBytes:qz length:qbytes options:opts];
-    id<MTLBuffer> bvx = [mb->device newBufferWithBytes:vx length:vbytes options:opts];
-    id<MTLBuffer> bvy = [mb->device newBufferWithBytes:vy length:vbytes options:opts];
-    id<MTLBuffer> bvz = [mb->device newBufferWithBytes:vz length:vbytes options:opts];
-    id<MTLBuffer> bTri = [mb->device newBufferWithBytes:triIndices length:triIdxBytes options:opts];
-    id<MTLBuffer> bQc = [mb->device newBufferWithBytes:&queryCount length:sizeof(int) options:opts];
-    id<MTLBuffer> bTc = [mb->device newBufferWithBytes:&triangleCount length:sizeof(int) options:opts];
-    id<MTLBuffer> bOutX = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutY = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutZ = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutD = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutI = [mb->device newBufferWithLength:qc * sizeof(int) options:opts];
+    const bool needRealloc = mb->cpMeshCachedVertexCount != vertexCount || mb->cpMeshCachedTriCount != triangleCount
+        || mb->cpMeshCachedQueryCount != queryCount;
 
-    if (bqx == nil || bqy == nil || bqz == nil || bvx == nil || bvy == nil || bvz == nil || bTri == nil || bQc == nil
-        || bTc == nil || bOutX == nil || bOutY == nil || bOutZ == nil || bOutD == nil || bOutI == nil)
-        return -32;
+    if (needRealloc) {
+        ReleaseCpMeshCache(mb);
+
+        mb->cpMeshVx = [mb->device newBufferWithLength:vbytes options:opts];
+        mb->cpMeshVy = [mb->device newBufferWithLength:vbytes options:opts];
+        mb->cpMeshVz = [mb->device newBufferWithLength:vbytes options:opts];
+        mb->cpMeshTri = [mb->device newBufferWithLength:triIdxBytes options:opts];
+        mb->cpMeshQx = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpMeshQy = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpMeshQz = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpMeshQc = [mb->device newBufferWithLength:sizeof(int) options:opts];
+        mb->cpMeshTc = [mb->device newBufferWithLength:sizeof(int) options:opts];
+        mb->cpMeshOutX = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpMeshOutY = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpMeshOutZ = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpMeshOutD = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpMeshOutI = [mb->device newBufferWithLength:qc * sizeof(int) options:opts];
+
+        if (mb->cpMeshVx == nil || mb->cpMeshVy == nil || mb->cpMeshVz == nil || mb->cpMeshTri == nil || mb->cpMeshQx == nil
+            || mb->cpMeshQy == nil || mb->cpMeshQz == nil || mb->cpMeshQc == nil || mb->cpMeshTc == nil || mb->cpMeshOutX == nil
+            || mb->cpMeshOutY == nil || mb->cpMeshOutZ == nil || mb->cpMeshOutD == nil || mb->cpMeshOutI == nil)
+            return -32;
+
+        memcpy([mb->cpMeshVx contents], vx, vbytes);
+        memcpy([mb->cpMeshVy contents], vy, vbytes);
+        memcpy([mb->cpMeshVz contents], vz, vbytes);
+        memcpy([mb->cpMeshTri contents], triIndices, triIdxBytes);
+
+        mb->cpMeshCachedVertexCount = vertexCount;
+        mb->cpMeshCachedTriCount = triangleCount;
+        mb->cpMeshCachedQueryCount = queryCount;
+    }
+
+    memcpy([mb->cpMeshQx contents], qx, qbytes);
+    memcpy([mb->cpMeshQy contents], qy, qbytes);
+    memcpy([mb->cpMeshQz contents], qz, qbytes);
+    memcpy([mb->cpMeshQc contents], &queryCount, sizeof(int));
+    memcpy([mb->cpMeshTc contents], &triangleCount, sizeof(int));
 
     id<MTLComputePipelineState> pso = mb->closestPso;
     const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, MAX(qc, 1UL));
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
@@ -462,31 +550,31 @@ int mb_closest_points_mesh(
             return -34;
 
         [enc setComputePipelineState:pso];
-        [enc setBuffer:bqx offset:0 atIndex:0];
-        [enc setBuffer:bqy offset:0 atIndex:1];
-        [enc setBuffer:bqz offset:0 atIndex:2];
-        [enc setBuffer:bvx offset:0 atIndex:3];
-        [enc setBuffer:bvy offset:0 atIndex:4];
-        [enc setBuffer:bvz offset:0 atIndex:5];
-        [enc setBuffer:bTri offset:0 atIndex:6];
-        [enc setBuffer:bQc offset:0 atIndex:7];
-        [enc setBuffer:bTc offset:0 atIndex:8];
-        [enc setBuffer:bOutX offset:0 atIndex:9];
-        [enc setBuffer:bOutY offset:0 atIndex:10];
-        [enc setBuffer:bOutZ offset:0 atIndex:11];
-        [enc setBuffer:bOutD offset:0 atIndex:12];
-        [enc setBuffer:bOutI offset:0 atIndex:13];
+        [enc setBuffer:mb->cpMeshQx offset:0 atIndex:0];
+        [enc setBuffer:mb->cpMeshQy offset:0 atIndex:1];
+        [enc setBuffer:mb->cpMeshQz offset:0 atIndex:2];
+        [enc setBuffer:mb->cpMeshVx offset:0 atIndex:3];
+        [enc setBuffer:mb->cpMeshVy offset:0 atIndex:4];
+        [enc setBuffer:mb->cpMeshVz offset:0 atIndex:5];
+        [enc setBuffer:mb->cpMeshTri offset:0 atIndex:6];
+        [enc setBuffer:mb->cpMeshQc offset:0 atIndex:7];
+        [enc setBuffer:mb->cpMeshTc offset:0 atIndex:8];
+        [enc setBuffer:mb->cpMeshOutX offset:0 atIndex:9];
+        [enc setBuffer:mb->cpMeshOutY offset:0 atIndex:10];
+        [enc setBuffer:mb->cpMeshOutZ offset:0 atIndex:11];
+        [enc setBuffer:mb->cpMeshOutD offset:0 atIndex:12];
+        [enc setBuffer:mb->cpMeshOutI offset:0 atIndex:13];
         [enc dispatchThreads:MTLSizeMake(qc, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
     }
 
-    memcpy(outCx, [bOutX contents], qbytes);
-    memcpy(outCy, [bOutY contents], qbytes);
-    memcpy(outCz, [bOutZ contents], qbytes);
-    memcpy(outDistSq, [bOutD contents], qbytes);
-    memcpy(outTriIndex, [bOutI contents], qc * sizeof(int));
+    memcpy(outCx, [mb->cpMeshOutX contents], qbytes);
+    memcpy(outCy, [mb->cpMeshOutY contents], qbytes);
+    memcpy(outCz, [mb->cpMeshOutZ contents], qbytes);
+    memcpy(outDistSq, [mb->cpMeshOutD contents], qbytes);
+    memcpy(outTriIndex, [mb->cpMeshOutI contents], qc * sizeof(int));
     return 0;
 }
 
@@ -516,33 +604,53 @@ int mb_closest_points_cloud(
         return -41;
 
     const NSUInteger qc = static_cast<NSUInteger>(queryCount);
-    const NSUInteger tc = static_cast<NSUInteger>(targetCount);
+    const NSUInteger tcount = static_cast<NSUInteger>(targetCount);
     const NSUInteger qbytes = qc * sizeof(float);
-    const NSUInteger tbytes = tc * sizeof(float);
+    const NSUInteger tbytes = tcount * sizeof(float);
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
 
-    id<MTLBuffer> bqx = [mb->device newBufferWithBytes:qx length:qbytes options:opts];
-    id<MTLBuffer> bqy = [mb->device newBufferWithBytes:qy length:qbytes options:opts];
-    id<MTLBuffer> bqz = [mb->device newBufferWithBytes:qz length:qbytes options:opts];
-    id<MTLBuffer> bpx = [mb->device newBufferWithBytes:px length:tbytes options:opts];
-    id<MTLBuffer> bpy = [mb->device newBufferWithBytes:py length:tbytes options:opts];
-    id<MTLBuffer> bpz = [mb->device newBufferWithBytes:pz length:tbytes options:opts];
-    id<MTLBuffer> bQc = [mb->device newBufferWithBytes:&queryCount length:sizeof(int) options:opts];
-    id<MTLBuffer> bTc = [mb->device newBufferWithBytes:&targetCount length:sizeof(int) options:opts];
-    id<MTLBuffer> bOutX = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutY = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutZ = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutD = [mb->device newBufferWithLength:qbytes options:opts];
-    id<MTLBuffer> bOutI = [mb->device newBufferWithLength:qc * sizeof(int) options:opts];
+    const bool needRealloc = mb->cpCloudCachedTargetCount != targetCount || mb->cpCloudCachedQueryCount != queryCount;
 
-    if (bqx == nil || bqy == nil || bqz == nil || bpx == nil || bpy == nil || bpz == nil || bQc == nil || bTc == nil
-        || bOutX == nil || bOutY == nil || bOutZ == nil || bOutD == nil || bOutI == nil)
-        return -42;
+    if (needRealloc) {
+        ReleaseCpCloudCache(mb);
+
+        mb->cpCloudPx = [mb->device newBufferWithLength:tbytes options:opts];
+        mb->cpCloudPy = [mb->device newBufferWithLength:tbytes options:opts];
+        mb->cpCloudPz = [mb->device newBufferWithLength:tbytes options:opts];
+        mb->cpCloudQx = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpCloudQy = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpCloudQz = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpCloudQc = [mb->device newBufferWithLength:sizeof(int) options:opts];
+        mb->cpCloudTc = [mb->device newBufferWithLength:sizeof(int) options:opts];
+        mb->cpCloudOutX = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpCloudOutY = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpCloudOutZ = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpCloudOutD = [mb->device newBufferWithLength:qbytes options:opts];
+        mb->cpCloudOutI = [mb->device newBufferWithLength:qc * sizeof(int) options:opts];
+
+        if (mb->cpCloudPx == nil || mb->cpCloudPy == nil || mb->cpCloudPz == nil || mb->cpCloudQx == nil || mb->cpCloudQy == nil
+            || mb->cpCloudQz == nil || mb->cpCloudQc == nil || mb->cpCloudTc == nil || mb->cpCloudOutX == nil
+            || mb->cpCloudOutY == nil || mb->cpCloudOutZ == nil || mb->cpCloudOutD == nil || mb->cpCloudOutI == nil)
+            return -42;
+
+        memcpy([mb->cpCloudPx contents], px, tbytes);
+        memcpy([mb->cpCloudPy contents], py, tbytes);
+        memcpy([mb->cpCloudPz contents], pz, tbytes);
+
+        mb->cpCloudCachedTargetCount = targetCount;
+        mb->cpCloudCachedQueryCount = queryCount;
+    }
+
+    memcpy([mb->cpCloudQx contents], qx, qbytes);
+    memcpy([mb->cpCloudQy contents], qy, qbytes);
+    memcpy([mb->cpCloudQz contents], qz, qbytes);
+    memcpy([mb->cpCloudQc contents], &queryCount, sizeof(int));
+    memcpy([mb->cpCloudTc contents], &targetCount, sizeof(int));
 
     id<MTLComputePipelineState> pso = mb->closestCloudPso;
     const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, MAX(qc, 1UL));
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
@@ -554,108 +662,158 @@ int mb_closest_points_cloud(
             return -44;
 
         [enc setComputePipelineState:pso];
-        [enc setBuffer:bqx offset:0 atIndex:0];
-        [enc setBuffer:bqy offset:0 atIndex:1];
-        [enc setBuffer:bqz offset:0 atIndex:2];
-        [enc setBuffer:bpx offset:0 atIndex:3];
-        [enc setBuffer:bpy offset:0 atIndex:4];
-        [enc setBuffer:bpz offset:0 atIndex:5];
-        [enc setBuffer:bQc offset:0 atIndex:6];
-        [enc setBuffer:bTc offset:0 atIndex:7];
-        [enc setBuffer:bOutX offset:0 atIndex:8];
-        [enc setBuffer:bOutY offset:0 atIndex:9];
-        [enc setBuffer:bOutZ offset:0 atIndex:10];
-        [enc setBuffer:bOutD offset:0 atIndex:11];
-        [enc setBuffer:bOutI offset:0 atIndex:12];
+        [enc setBuffer:mb->cpCloudQx offset:0 atIndex:0];
+        [enc setBuffer:mb->cpCloudQy offset:0 atIndex:1];
+        [enc setBuffer:mb->cpCloudQz offset:0 atIndex:2];
+        [enc setBuffer:mb->cpCloudPx offset:0 atIndex:3];
+        [enc setBuffer:mb->cpCloudPy offset:0 atIndex:4];
+        [enc setBuffer:mb->cpCloudPz offset:0 atIndex:5];
+        [enc setBuffer:mb->cpCloudQc offset:0 atIndex:6];
+        [enc setBuffer:mb->cpCloudTc offset:0 atIndex:7];
+        [enc setBuffer:mb->cpCloudOutX offset:0 atIndex:8];
+        [enc setBuffer:mb->cpCloudOutY offset:0 atIndex:9];
+        [enc setBuffer:mb->cpCloudOutZ offset:0 atIndex:10];
+        [enc setBuffer:mb->cpCloudOutD offset:0 atIndex:11];
+        [enc setBuffer:mb->cpCloudOutI offset:0 atIndex:12];
         [enc dispatchThreads:MTLSizeMake(qc, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
     }
 
-    memcpy(outCx, [bOutX contents], qbytes);
-    memcpy(outCy, [bOutY contents], qbytes);
-    memcpy(outCz, [bOutZ contents], qbytes);
-    memcpy(outDistSq, [bOutD contents], qbytes);
-    memcpy(outIndex, [bOutI contents], qc * sizeof(int));
+    memcpy(outCx, [mb->cpCloudOutX contents], qbytes);
+    memcpy(outCy, [mb->cpCloudOutY contents], qbytes);
+    memcpy(outCz, [mb->cpCloudOutZ contents], qbytes);
+    memcpy(outDistSq, [mb->cpCloudOutD contents], qbytes);
+    memcpy(outIndex, [mb->cpCloudOutI contents], qc * sizeof(int));
     return 0;
 }
 
-int mb_delaunay_mark_bad_triangles(
+int mb_jfa_delaunay_2d(
     void* ctx,
-    float* px,
-    float* py,
-    int vertexCount,
-    int* triFlat,
-    int triCount,
-    float queryX,
-    float queryY,
-    int* outBad)
+    const float* px,
+    const float* py,
+    int pointCount,
+    int* outEdgeA,
+    int* outEdgeB,
+    int* outEdgeCount,
+    int maxEdges,
+    int gridResolution)
 {
-    if (ctx == nullptr || vertexCount <= 0 || triCount <= 0 || px == nullptr || py == nullptr || triFlat == nullptr
-        || outBad == nullptr)
-        return -50;
+    if (ctx == nullptr || pointCount < 3 || px == nullptr || py == nullptr || outEdgeA == nullptr || outEdgeB == nullptr
+        || outEdgeCount == nullptr || maxEdges <= 0)
+        return -70;
 
     auto* mb = static_cast<MBContext*>(ctx);
-    if (mb->queue == nil || mb->delaunayMarkPso == nil)
-        return -51;
+    if (mb->queue == nil || mb->jfaInitPso == nil || mb->jfaStepPso == nil || mb->jfaEdgePso == nil)
+        return -71;
 
-    for (int t = 0; t < triCount; t++)
-    {
-        int ia = triFlat[3 * t];
-        int ib = triFlat[3 * t + 1];
-        int ic = triFlat[3 * t + 2];
-        if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount)
-            return -52;
-    }
+    int res = 64;
+    while (res < gridResolution)
+        res *= 2;
 
-    const NSUInteger vc = static_cast<NSUInteger>(vertexCount);
-    const NSUInteger tc = static_cast<NSUInteger>(triCount);
-    const NSUInteger vbytes = vc * sizeof(float);
-    const NSUInteger triBytes = tc * 3u * sizeof(int);
-    const NSUInteger badBytes = tc * sizeof(int);
+    const NSUInteger cellCount = static_cast<NSUInteger>(res * res);
+    const NSUInteger gridBytes = cellCount * sizeof(int);
+    const NSUInteger edgeBytes = cellCount * 4u * sizeof(int);
+    const NSUInteger pBytes = static_cast<NSUInteger>(pointCount) * sizeof(float);
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
 
-    id<MTLBuffer> bpx = [mb->device newBufferWithBytes:px length:vbytes options:opts];
-    id<MTLBuffer> bpy = [mb->device newBufferWithBytes:py length:vbytes options:opts];
-    id<MTLBuffer> bTri = [mb->device newBufferWithBytes:triFlat length:triBytes options:opts];
-    id<MTLBuffer> bQx = [mb->device newBufferWithBytes:&queryX length:sizeof(float) options:opts];
-    id<MTLBuffer> bQy = [mb->device newBufferWithBytes:&queryY length:sizeof(float) options:opts];
-    id<MTLBuffer> bOut = [mb->device newBufferWithLength:badBytes options:opts];
-    id<MTLBuffer> bTc = [mb->device newBufferWithBytes:&triCount length:sizeof(int) options:opts];
+    id<MTLBuffer> bGridA = [mb->device newBufferWithLength:gridBytes options:opts];
+    id<MTLBuffer> bGridB = [mb->device newBufferWithLength:gridBytes options:opts];
+    id<MTLBuffer> bPx = [mb->device newBufferWithBytes:px length:pBytes options:opts];
+    id<MTLBuffer> bPy = [mb->device newBufferWithBytes:py length:pBytes options:opts];
+    id<MTLBuffer> bN = [mb->device newBufferWithBytes:&pointCount length:sizeof(int) options:opts];
+    id<MTLBuffer> bRes = [mb->device newBufferWithBytes:&res length:sizeof(int) options:opts];
+    id<MTLBuffer> bEdges = [mb->device newBufferWithLength:edgeBytes options:opts];
+    id<MTLBuffer> bStep = [mb->device newBufferWithLength:sizeof(int) options:opts];
 
-    if (bpx == nil || bpy == nil || bTri == nil || bQx == nil || bQy == nil || bOut == nil || bTc == nil)
-        return -53;
+    if (bGridA == nil || bGridB == nil || bPx == nil || bPy == nil || bN == nil || bRes == nil || bEdges == nil || bStep == nil)
+        return -72;
 
-    id<MTLComputePipelineState> pso = mb->delaunayMarkPso;
-    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, MAX(tc, 1UL));
+    memset([bGridA contents], 0xFF, gridBytes);
+    memset([bGridB contents], 0xFF, gridBytes);
+
+    const NSUInteger maxTpgInit = mb->jfaInitPso.maxTotalThreadsPerThreadgroup;
+    const NSUInteger tpgInit = MIN(maxTpgInit, 256UL);
+    const NSUInteger tpg2d = 16;
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
         if (cmd == nil)
-            return -54;
+            return -73;
 
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
         if (enc == nil)
-            return -55;
+            return -74;
 
-        [enc setComputePipelineState:pso];
-        [enc setBuffer:bpx offset:0 atIndex:0];
-        [enc setBuffer:bpy offset:0 atIndex:1];
-        [enc setBuffer:bTri offset:0 atIndex:2];
-        [enc setBuffer:bQx offset:0 atIndex:3];
-        [enc setBuffer:bQy offset:0 atIndex:4];
-        [enc setBuffer:bOut offset:0 atIndex:5];
-        [enc setBuffer:bTc offset:0 atIndex:6];
-        [enc dispatchThreads:MTLSizeMake(tc, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc setComputePipelineState:mb->jfaInitPso];
+        [enc setBuffer:bGridA offset:0 atIndex:0];
+        [enc setBuffer:bPx offset:0 atIndex:1];
+        [enc setBuffer:bPy offset:0 atIndex:2];
+        [enc setBuffer:bN offset:0 atIndex:3];
+        [enc setBuffer:bRes offset:0 atIndex:4];
+        [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(pointCount), 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(tpgInit, 1, 1)];
+
+        int step = res / 2;
+        id<MTLBuffer> src = bGridA;
+        id<MTLBuffer> dst = bGridB;
+
+        while (step >= 1) {
+            memcpy([bStep contents], &step, sizeof(int));
+            [enc setComputePipelineState:mb->jfaStepPso];
+            [enc setBuffer:src offset:0 atIndex:0];
+            [enc setBuffer:dst offset:0 atIndex:1];
+            [enc setBuffer:bPx offset:0 atIndex:2];
+            [enc setBuffer:bPy offset:0 atIndex:3];
+            [enc setBuffer:bStep offset:0 atIndex:4];
+            [enc setBuffer:bRes offset:0 atIndex:5];
+            [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(res), static_cast<NSUInteger>(res), 1)
+             threadsPerThreadgroup:MTLSizeMake(tpg2d, tpg2d, 1)];
+
+            id<MTLBuffer> tmp = src;
+            src = dst;
+            dst = tmp;
+            step /= 2;
+        }
+
+        [enc setComputePipelineState:mb->jfaEdgePso];
+        [enc setBuffer:src offset:0 atIndex:0];
+        [enc setBuffer:bEdges offset:0 atIndex:1];
+        [enc setBuffer:bRes offset:0 atIndex:2];
+        [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(res), static_cast<NSUInteger>(res), 1)
+         threadsPerThreadgroup:MTLSizeMake(tpg2d, tpg2d, 1)];
+
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
     }
 
-    memcpy(outBad, [bOut contents], badBytes);
+    const int* rawEdges = static_cast<const int*>([bEdges contents]);
+    const NSUInteger totalCells = cellCount;
+
+    std::vector<std::pair<int, int>> edgeSet;
+    edgeSet.reserve(static_cast<size_t>(pointCount) * 6u);
+
+    for (NSUInteger i = 0; i < totalCells; i++) {
+        for (int e = 0; e < 2; e++) {
+            int a = rawEdges[i * 4 + e * 2 + 0];
+            int b = rawEdges[i * 4 + e * 2 + 1];
+            if (a >= 0 && b >= 0 && a != b)
+                edgeSet.push_back({ a, b });
+        }
+    }
+
+    std::sort(edgeSet.begin(), edgeSet.end());
+    edgeSet.erase(std::unique(edgeSet.begin(), edgeSet.end()), edgeSet.end());
+
+    int count = static_cast<int>(std::min(edgeSet.size(), static_cast<size_t>(maxEdges)));
+    for (int i = 0; i < count; i++) {
+        outEdgeA[i] = edgeSet[static_cast<size_t>(i)].first;
+        outEdgeB[i] = edgeSet[static_cast<size_t>(i)].second;
+    }
+    *outEdgeCount = count;
     return 0;
 }
 
@@ -711,7 +869,7 @@ int mb_build_weighted_edges_csr(
 
     id<MTLComputePipelineState> pso = mb->meshEdgesPso;
     const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
-    const NSUInteger tpg = MIN(maxTpg, MAX(v, 1UL));
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
 
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];

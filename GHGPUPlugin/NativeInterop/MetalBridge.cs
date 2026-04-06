@@ -83,17 +83,17 @@ public static class MetalBridge
         [Out] float[] outDistSq,
         [Out] int[] outTriIndex);
 
-    [DllImport(LibName, EntryPoint = "mb_delaunay_mark_bad_triangles", CallingConvention = CallingConvention.Cdecl)]
-    public static extern int DelaunayMarkBadTriangles(
+    [DllImport(LibName, EntryPoint = "mb_jfa_delaunay_2d", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int JfaDelaunay2D(
         IntPtr ctx,
         [In] float[] px,
         [In] float[] py,
-        int vertexCount,
-        [In] int[] triFlat,
-        int triCount,
-        float queryX,
-        float queryY,
-        [Out] int[] outBad);
+        int pointCount,
+        [Out] int[] outEdgeA,
+        [Out] int[] outEdgeB,
+        out int outEdgeCount,
+        int maxEdges,
+        int gridResolution);
 
     [DllImport(LibName, EntryPoint = "mb_build_weighted_edges_csr", CallingConvention = CallingConvention.Cdecl)]
     public static extern int BuildWeightedEdgesCsr(

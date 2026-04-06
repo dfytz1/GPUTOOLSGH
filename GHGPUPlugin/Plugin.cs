@@ -7,10 +7,28 @@ namespace GHGPUPlugin;
 /// <summary>Grasshopper assembly metadata and native bridge bootstrap.</summary>
 public class Plugin : GH_AssemblyInfo
 {
+    private sealed class ContextFinalizer
+    {
+        ~ContextFinalizer()
+        {
+            try
+            {
+                MetalSharedContext.DestroyCachedContext();
+            }
+            catch
+            {
+                // Best-effort teardown during AppDomain unload.
+            }
+        }
+    }
+
+    private static readonly ContextFinalizer _finalizer = new();
+
     static Plugin()
     {
         NativeLoader.EnsureLoaded();
         AccelerateInterop.EnsureLoaded();
+        _ = _finalizer;
     }
 
     public Plugin()

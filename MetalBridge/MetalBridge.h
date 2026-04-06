@@ -78,17 +78,17 @@ int mb_closest_points_cloud(
     float* outDistSq,
     int* outIndex);
 
-/// Mark Delaunay triangles whose circumcircle contains (@p queryX, @p queryY). @p triFlat length @p triCount * 3.
-int mb_delaunay_mark_bad_triangles(
+/// JFA-based 2D Delaunay (Voronoi dual): @p px, @p py normalised to [0,1]. @p outEdgeA/B length @p maxEdges.
+int mb_jfa_delaunay_2d(
     void* ctx,
-    float* px,
-    float* py,
-    int vertexCount,
-    int* triFlat,
-    int triCount,
-    float queryX,
-    float queryY,
-    int* outBad);
+    const float* px,
+    const float* py,
+    int pointCount,
+    int* outEdgeA,
+    int* outEdgeB,
+    int* outEdgeCount,
+    int maxEdges,
+    int gridResolution);
 
 /// Fill directed edges with Euclidean 3D lengths; @p edgeCount must equal @p rowOffsets[vertexCount]. @p edgeWriteBase[v] is write offset (typically @p rowOffsets).
 int mb_build_weighted_edges_csr(
