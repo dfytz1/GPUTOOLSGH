@@ -302,7 +302,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             List<MgLevel> mgLevels;
             if (useGpu)
                 mgLevels = MgGrid.BuildHierarchy(
-                    inside, support, load, nx, ny, nz, S, dxFine, dyFine, dzFine, nu, maxLevels: 4);
+                    inside, support, load, nxc, nyc, nzc, 1, dxFine * S, dyFine * S, dzFine * S, nu, maxLevels: 4);
             else
                 mgLevels = new List<MgLevel>();
             res.MgLevelCount = mgLevels.Count;
@@ -393,6 +393,10 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 }
             }
 
+            MgPinnedData? mgPinned = null;
+            if (canUseMgpcg)
+                mgPinned = new MgPinnedData(mgLevels);
+
             try
             {
                 for (int outer = 0; outer < maxOuterIter; outer++)
@@ -421,42 +425,39 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     int mgPcgIters = 0;
 
                     if (canUseMgpcg && mgRhoArrays != null && mgRhoFloatsPinned != null && mgRhoPtrsPinned != null
-                        && fGpu != null && uGpu != null)
+                        && fGpu != null && uGpu != null && mgPinned != null)
                     {
-                        using (var pinned = new MgPinnedData(mgLevels))
+                        for (int l = 0; l < mgLevels.Count; l++)
                         {
-                            for (int l = 0; l < mgLevels.Count; l++)
-                            {
-                                var rf = mgRhoFloatsPinned[l];
-                                for (int e = 0; e < mgLevels[l].NElem; e++)
-                                    rf[e] = (float)mgRhoArrays[l][e];
-                            }
+                            var rf = mgRhoFloatsPinned[l];
+                            for (int e = 0; e < mgLevels[l].NElem; e++)
+                                rf[e] = (float)mgRhoArrays[l][e];
+                        }
 
+                        for (int i = 0; i < ndof; i++)
+                        {
+                            fGpu[i] = (float)f[i];
+                            uGpu[i] = (float)u[i];
+                        }
+
+                        int mgCode = MetalBridge.FemMgPcgSolve(
+                            gpuCtx,
+                            mgPinned.KeUnique, mgPinned.KeIdx, mgPinned.DofMap, mgPinned.Diag, mgPinned.Fixed,
+                            mgPinned.Prolong, mgPinned.ProlongW,
+                            mgRhoPtrsPinned,
+                            mgPinned.NElem, mgPinned.NDof, mgPinned.NumUnique,
+                            mgLevels.Count,
+                            fGpu, uGpu,
+                            maxPcgIter, (float)tolRel,
+                            nSmooth: 2, omegaJacobi: 0.67f,
+                            out mgPcgIters);
+
+                        if (mgCode == 0)
+                        {
                             for (int i = 0; i < ndof; i++)
-                            {
-                                fGpu[i] = (float)f[i];
-                                uGpu[i] = (float)u[i];
-                            }
-
-                            int mgCode = MetalBridge.FemMgPcgSolve(
-                                gpuCtx,
-                                pinned.KeUnique, pinned.KeIdx, pinned.DofMap, pinned.Diag, pinned.Fixed,
-                                pinned.Prolong, pinned.ProlongW,
-                                mgRhoPtrsPinned,
-                                pinned.NElem, pinned.NDof, pinned.NumUnique,
-                                mgLevels.Count,
-                                fGpu, uGpu,
-                                maxPcgIter, (float)tolRel,
-                                nSmooth: 2, omegaJacobi: 0.67f,
-                                out mgPcgIters);
-
-                            if (mgCode == 0)
-                            {
-                                for (int i = 0; i < ndof; i++)
-                                    u[i] = uGpu[i];
-                                solvedGpuPcg = true;
-                                solvedMgPcg = true;
-                            }
+                                u[i] = uGpu[i];
+                            solvedGpuPcg = true;
+                            solvedMgPcg = true;
                         }
                     }
 
@@ -524,6 +525,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             }
             finally
             {
+                mgPinned?.Dispose();
                 if (mgRhoGCHandles != null)
                 {
                     for (int hi = 0; hi < mgRhoGCHandles.Length; hi++)
