@@ -158,7 +158,7 @@ public static class ApproximateHeatGeodesic
         for (int mv = 0; mv < vc; mv++)
         {
             int ti = tv.TopologyVertexIndex(mv);
-            distancePerMeshVertex[mv] = x[ti];
+            distancePerMeshVertex[mv] = seedTopo[ti] ? 0.0 : x[ti];
         }
 
         return true;

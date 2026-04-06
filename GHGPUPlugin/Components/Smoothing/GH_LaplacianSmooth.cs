@@ -185,5 +185,5 @@ public class GH_LaplacianSmooth : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("fa8d7e40-cf38-4773-9684-a3b3b36e94e8");
+    public override Guid ComponentGuid => new("42f238ab-96e9-4116-a191-7d5471df7f80");
 }

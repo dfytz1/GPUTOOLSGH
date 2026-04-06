@@ -92,5 +92,5 @@ public class GH_MeshCurvature : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("d4e5f6a7-b8c9-0123-defa-234567890123");
+    public override Guid ComponentGuid => new("f8554489-44aa-485e-b453-7dc7ba4d5bc7");
 }

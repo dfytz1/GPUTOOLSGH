@@ -15,7 +15,7 @@ public class GH_ShortestRouteCurves : GH_Component
             "RouteCrvGPU",
             "Each curve is one edge between its endpoints; endpoints merge within MergeTol. Weights use arc length unless Fast mode uses chord length. Start/end snap to the nearest graph node within SnapTol (linear scan).",
             "GPUTools",
-            "Curve")
+            "Graph")
     {
     }
 
@@ -143,5 +143,5 @@ public class GH_ShortestRouteCurves : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("c4e2b8a1-2f1d-4e6a-9c0b-5d3e7f1a2b4c");
+    public override Guid ComponentGuid => new("33fb7cfb-2fb9-4f14-8fdb-de62b5471ec3");
 }

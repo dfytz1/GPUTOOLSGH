@@ -183,14 +183,14 @@ public static class CurveNetworkShortestPath
         CurveGraph g,
         Point3d sourcePt,
         double snapTolerance,
-        out int sourceIndex,
-        out double[] distances,
-        out int[] prev,
+        out int sourceIdx,
+        out double[]? dist,
+        out int[]? prev,
         out string? error)
     {
-        sourceIndex = -1;
-        distances = Array.Empty<double>();
-        prev = Array.Empty<int>();
+        sourceIdx = -1;
+        dist = null;
+        prev = null;
         error = null;
 
         if (snapTolerance <= 0)
@@ -212,39 +212,39 @@ public static class CurveNetworkShortestPath
             return false;
         }
 
-        sourceIndex = startV;
+        sourceIdx = startV;
         int n = g.Vertices.Count;
-        var dist = new double[n];
-        var p = new int[n];
+        var distArr = new double[n];
+        var prevArr = new int[n];
         for (int i = 0; i < n; i++)
         {
-            dist[i] = double.PositiveInfinity;
-            p[i] = -1;
+            distArr[i] = double.PositiveInfinity;
+            prevArr[i] = -1;
         }
 
-        dist[startV] = 0;
+        distArr[startV] = 0;
         var pq = new PriorityQueue<int, double>();
         pq.Enqueue(startV, 0);
 
         while (pq.TryDequeue(out int u, out double du))
         {
-            if (du > dist[u])
+            if (du > distArr[u])
                 continue;
 
             foreach (var (v, w) in g.Adj[u])
             {
                 double nd = du + w;
-                if (nd < dist[v])
+                if (nd < distArr[v])
                 {
-                    dist[v] = nd;
-                    p[v] = u;
+                    distArr[v] = nd;
+                    prevArr[v] = u;
                     pq.Enqueue(v, nd);
                 }
             }
         }
 
-        distances = dist;
-        prev = p;
+        dist = distArr;
+        prev = prevArr;
         return true;
     }
 

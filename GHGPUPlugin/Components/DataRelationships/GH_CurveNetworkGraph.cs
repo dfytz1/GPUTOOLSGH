@@ -14,7 +14,7 @@ public class GH_CurveNetworkGraph : GH_Component
             "CrvNetGraphGPU",
             "Builds an undirected curve network (one edge per curve, merged endpoints). No pathfinding.",
             "GPUTools",
-            "Routing")
+            "Graph")
     {
     }
 
@@ -86,5 +86,5 @@ public class GH_CurveNetworkGraph : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+    public override Guid ComponentGuid => new("b711343a-1d35-49ad-a8cd-96e6f694eccb");
 }

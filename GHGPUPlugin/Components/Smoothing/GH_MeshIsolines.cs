@@ -13,7 +13,7 @@ public class GH_MeshIsolines : GH_Component
         : base(
             "Mesh Isolines GPU",
             "MeshIsoGPU",
-            "Extract isolines from a per-vertex scalar field by edge marching and segment chaining.",
+            "Extract isolines from a per-vertex scalar field by edge marching and segment chaining. Mesh Geodesic Distance GPU: wire its M→M and S→S.",
             "GPUTools",
             "Mesh")
     {
@@ -103,5 +103,5 @@ public class GH_MeshIsolines : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("e5f6a7b8-c9d0-1234-efab-345678901234");
+    public override Guid ComponentGuid => new("f98c9660-fe08-47a9-a2f8-c036dc63fd03");
 }

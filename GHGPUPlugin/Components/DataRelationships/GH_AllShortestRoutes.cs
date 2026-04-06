@@ -14,7 +14,7 @@ public class GH_AllShortestRoutes : GH_Component
             "AllRoutesGPU",
             "Single-source Dijkstra to every node from a snapped source point. Outputs distances and a shortest-path tree as line segments.",
             "GPUTools",
-            "Routing")
+            "Graph")
     {
     }
 
@@ -111,5 +111,5 @@ public class GH_AllShortestRoutes : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("b2c3d4e5-f6a7-8901-bcde-f12345678901");
+    public override Guid ComponentGuid => new("faa18d3b-b7e5-433f-ae77-10e798be153c");
 }

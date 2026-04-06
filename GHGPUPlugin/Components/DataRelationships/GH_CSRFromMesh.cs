@@ -64,5 +64,5 @@ public class GH_CSRFromMesh : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("fbb28251-5eda-4d4e-91f2-4107daeab278");
+    public override Guid ComponentGuid => new("8cc7f732-9b72-452d-8d7a-3ae1d90d4127");
 }

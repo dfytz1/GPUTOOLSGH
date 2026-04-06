@@ -16,7 +16,7 @@ public class GH_ShortestRouteGPU : GH_Component
             "RouteMeshGPU",
             "Shortest path on mesh topology (Euclidean edge weights). Start/end points are snapped to the nearest mesh corner (topology vertex) via closest face. Dijkstra on CPU; optional Metal to build weighted edge list.",
             "GPUTools",
-            "Curve")
+            "Graph")
     {
     }
 
@@ -132,5 +132,5 @@ public class GH_ShortestRouteGPU : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("8caadf07-6376-45e5-bb75-978b9f4b5713");
+    public override Guid ComponentGuid => new("ad1469e9-f5a6-4805-bb28-ec71028c54f7");
 }

@@ -16,7 +16,7 @@ public class GH_ClosestPointPoints : GH_Component
             "CptPtsGPU",
             "For each query point, find the closest target point (Euclidean). Optional Metal brute force.",
             "GPUTools",
-            "Mesh")
+            "Point")
     {
     }
 
@@ -169,5 +169,5 @@ public class GH_ClosestPointPoints : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("4e6d1920-483c-40fc-be0a-034ceb62a535");
+    public override Guid ComponentGuid => new("b87c95c2-6456-4b67-88b1-ca84cd327050");
 }

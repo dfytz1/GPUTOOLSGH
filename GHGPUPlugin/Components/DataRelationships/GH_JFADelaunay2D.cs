@@ -15,7 +15,7 @@ public class GH_JFADelaunay2D : GH_Component
             "JFADelGPU",
             "GPU Jump Flooding Voronoi on a grid, then dual edges (approximate Delaunay edges). Projects points to a plane; requires Metal.",
             "GPUTools",
-            "Mesh")
+            "Graph")
     {
     }
 
@@ -113,5 +113,5 @@ public class GH_JFADelaunay2D : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("d3f7a921-4c8e-4b5d-a1f2-9e3c7b6d0812");
+    public override Guid ComponentGuid => new("222f4947-3b6f-4a92-9977-5bdbeb1be4ef");
 }

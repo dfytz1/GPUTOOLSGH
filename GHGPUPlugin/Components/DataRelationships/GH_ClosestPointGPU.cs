@@ -209,5 +209,5 @@ public class GH_ClosestPointGPU : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("aed0a06f-d4c9-4875-98fa-39a34d9d94e0");
+    public override Guid ComponentGuid => new("b9dc1832-9981-4724-93df-ec3a60b03b6a");
 }
