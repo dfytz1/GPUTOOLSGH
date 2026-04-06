@@ -47,6 +47,19 @@ public static class MetalBridge
         float strength,
         int iterations);
 
+    [DllImport(LibName, EntryPoint = "mb_run_laplacian_constrained", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int RunLaplacianConstrained(
+        IntPtr ctx,
+        [In, Out] float[] posX,
+        [In, Out] float[] posY,
+        [In, Out] float[] posZ,
+        [In] int[] adjFlat,
+        [In] int[] rowOffsets,
+        int vertexCount,
+        float strength,
+        int iterations,
+        [In] byte[] fixedMask);
+
     [DllImport(LibName, EntryPoint = "mb_closest_points_cloud", CallingConvention = CallingConvention.Cdecl)]
     public static extern int ClosestPointsCloud(
         IntPtr ctx,

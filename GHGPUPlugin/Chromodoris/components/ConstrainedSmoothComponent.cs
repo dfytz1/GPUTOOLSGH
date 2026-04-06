@@ -140,53 +140,28 @@ namespace GHGPUPlugin.Chromodoris
                     var vx = new float[nTopo];
                     var vy = new float[nTopo];
                     var vz = new float[nTopo];
+                    var fixedBytes = new byte[nTopo];
+
                     for (int t = 0; t < nTopo; t++)
                     {
                         var p = tv[t];
-                        vx[t] = p.X;
-                        vy[t] = p.Y;
-                        vz[t] = p.Z;
+                        vx[t] = p.X; vy[t] = p.Y; vz[t] = p.Z;
+                        fixedBytes[t] = flags[t] ? (byte)1 : (byte)0;
                     }
 
-                    var ox = new float[nTopo];
-                    var oy = new float[nTopo];
-                    var oz = new float[nTopo];
                     var meshVertToTopo = new int[mesh.Vertices.Count];
                     for (int ti = 0; ti < nTopo; ti++)
                     {
                         int[] mvInds = tv.MeshVertexIndices(ti);
-                        for (int k = 0; k < mvInds.Length; k++)
-                            meshVertToTopo[mvInds[k]] = ti;
+                        foreach (int mv in mvInds) meshVertToTopo[mv] = ti;
                     }
 
-                    for (int mv = 0; mv < mesh.Vertices.Count; mv++)
-                    {
-                        int ti = meshVertToTopo[mv];
-                        if (flags[ti])
-                        {
-                            var p = mesh.Vertices[mv];
-                            ox[ti] = (float)p.X;
-                            oy[ti] = (float)p.Y;
-                            oz[ti] = (float)p.Z;
-                        }
-                    }
+                    int code = MetalBridge.RunLaplacianConstrained(
+                        ctx, vx, vy, vz, adjFlat, rowOffsets,
+                        nTopo, (float)step, iterations, fixedBytes);
 
-                    for (int it = 0; it < iterations; it++)
-                    {
-                        int code = MetalBridge.RunLaplacianIterations(
-                            ctx, vx, vy, vz, adjFlat, rowOffsets, nTopo, (float)step, 1);
-                        if (code != 0)
-                            throw new Exception($"RunLaplacianIterations returned {code}");
-                        for (int t = 0; t < nTopo; t++)
-                        {
-                            if (flags[t])
-                            {
-                                vx[t] = ox[t];
-                                vy[t] = oy[t];
-                                vz[t] = oz[t];
-                            }
-                        }
-                    }
+                    if (code != 0)
+                        throw new Exception($"RunLaplacianConstrained returned {code}");
 
                     outMesh = mesh.DuplicateMesh();
                     for (int mv = 0; mv < outMesh.Vertices.Count; mv++)
@@ -194,13 +169,13 @@ namespace GHGPUPlugin.Chromodoris
                         int ti = meshVertToTopo[mv];
                         outMesh.Vertices.SetVertex(mv, vx[ti], vy[ti], vz[ti]);
                     }
-
                     outMesh.Normals.ComputeNormals();
                     gpuOk = true;
                 }
                 catch (Exception ex)
                 {
-                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, $"GPU smooth failed: {ex.Message} — CPU fallback.");
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                        $"GPU constrained smooth failed: {ex.Message} — CPU fallback.");
                     outMesh = new ConstrainedVertexSmooth(mesh, step, iterations, flags).Compute();
                 }
             }

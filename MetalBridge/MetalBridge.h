@@ -42,6 +42,20 @@ int mb_run_laplacian_iterations(
     float strength,
     int iterations);
 
+/// Laplacian smoothing with per-vertex fixed mask on-GPU; @p fixedMask[i] non-zero locks vertex @p i.
+/// Runs @p iterations in one command-buffer submit; overwrites @p posX/Y/Z with final state.
+int mb_run_laplacian_constrained(
+    void* ctx,
+    float* posX,
+    float* posY,
+    float* posZ,
+    const int* adjFlat,
+    const int* rowOffsets,
+    int vertexCount,
+    float strength,
+    int iterations,
+    const unsigned char* fixedMask);
+
 /// Closest point on triangle mesh (brute force per query). @p triIndices length @p triangleCount * 3 (vertex indices per triangle).
 int mb_closest_points_mesh(
     void* ctx,

@@ -25,6 +25,7 @@ struct MBContext {
     id<MTLComputePipelineState> gradientMag3dPso = nil;
     id<MTLComputePipelineState> normalizeContrast3dPso = nil;
     id<MTLComputePipelineState> zeroVoxelBoundaryPso = nil;
+    id<MTLComputePipelineState> laplacianConstrainedPso = nil;
 
     // Laplacian: reuse GPU memory across iterations (topology size must match).
     id<MTLBuffer> lapBxIn = nil;
@@ -176,8 +177,9 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> gm3 = MakePso(device, library, @"gradient_magnitude_3d", &err);
         id<MTLComputePipelineState> nc3 = MakePso(device, library, @"normalize_contrast_3d", &err);
         id<MTLComputePipelineState> zvb = MakePso(device, library, @"zero_voxel_boundary", &err);
+        id<MTLComputePipelineState> lapC = MakePso(device, library, @"laplacianConstrainedKernel", &err);
         if (bench == nil || lap == nil || cls == nil || cld == nil || edg == nil || jfaI == nil || jfaS == nil || jfaE == nil
-            || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil)
+            || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil || lapC == nil)
             return -5;
 
         id<MTLCommandQueue> queue = [device newCommandQueue];
@@ -199,6 +201,7 @@ int mb_create_context(void** outCtx)
         ctx->gradientMag3dPso = gm3;
         ctx->normalizeContrast3dPso = nc3;
         ctx->zeroVoxelBoundaryPso = zvb;
+        ctx->laplacianConstrainedPso = lapC;
         *outCtx = ctx;
         return 0;
     }
@@ -221,6 +224,7 @@ void mb_destroy_context(void* ctx)
     mb->gradientMag3dPso = nil;
     mb->normalizeContrast3dPso = nil;
     mb->zeroVoxelBoundaryPso = nil;
+    mb->laplacianConstrainedPso = nil;
     mb->lapBxIn = mb->lapByIn = mb->lapBzIn = nil;
     mb->lapBxOut = mb->lapByOut = mb->lapBzOut = nil;
     mb->lapAdj = mb->lapOff = mb->lapVc = mb->lapStr = nil;
@@ -1289,6 +1293,103 @@ int mb_zero_voxel_boundary(void* ctx, float* data, int nx, int ny, int nz)
     }
 
     memcpy(data, [bData contents], nBytes);
+    return 0;
+}
+
+int mb_run_laplacian_constrained(
+    void* ctx,
+    float* posX,
+    float* posY,
+    float* posZ,
+    const int* adjFlat,
+    const int* rowOffsets,
+    int vertexCount,
+    float strength,
+    int iterations,
+    const unsigned char* fixedMask)
+{
+    if (ctx == nullptr || vertexCount <= 0 || iterations <= 0)
+        return -1;
+    if (posX == nullptr || posY == nullptr || posZ == nullptr)
+        return -1;
+    if (adjFlat == nullptr || rowOffsets == nullptr || fixedMask == nullptr)
+        return -1;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->laplacianConstrainedPso == nil)
+        return -1;
+
+    const NSUInteger v = static_cast<NSUInteger>(vertexCount);
+    const NSUInteger fbytes = v * sizeof(float);
+    const NSUInteger ubytes = v * sizeof(unsigned char);
+    const int nnz = rowOffsets[vertexCount];
+    if (nnz < 0)
+        return -1;
+    const NSUInteger adjBytes = static_cast<NSUInteger>(nnz) * sizeof(int);
+    const NSUInteger offBytes = (v + 1u) * sizeof(int);
+
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+
+    id<MTLBuffer> bAX = [mb->device newBufferWithLength:fbytes options:opts];
+    id<MTLBuffer> bAY = [mb->device newBufferWithLength:fbytes options:opts];
+    id<MTLBuffer> bAZ = [mb->device newBufferWithLength:fbytes options:opts];
+    id<MTLBuffer> bBX = [mb->device newBufferWithLength:fbytes options:opts];
+    id<MTLBuffer> bBY = [mb->device newBufferWithLength:fbytes options:opts];
+    id<MTLBuffer> bBZ = [mb->device newBufferWithLength:fbytes options:opts];
+    id<MTLBuffer> bAdj = [mb->device newBufferWithBytes:adjFlat length:adjBytes options:opts];
+    id<MTLBuffer> bOff = [mb->device newBufferWithBytes:rowOffsets length:offBytes options:opts];
+    id<MTLBuffer> bVc = [mb->device newBufferWithBytes:&vertexCount length:sizeof(int) options:opts];
+    id<MTLBuffer> bStr = [mb->device newBufferWithBytes:&strength length:sizeof(float) options:opts];
+    id<MTLBuffer> bFix = [mb->device newBufferWithBytes:fixedMask length:ubytes options:opts];
+
+    if (bAX == nil || bAY == nil || bAZ == nil || bBX == nil || bBY == nil || bBZ == nil || bAdj == nil || bOff == nil
+        || bVc == nil || bStr == nil || bFix == nil)
+        return -1;
+
+    memcpy([bAX contents], posX, fbytes);
+    memcpy([bAY contents], posY, fbytes);
+    memcpy([bAZ contents], posZ, fbytes);
+
+    id<MTLComputePipelineState> pso = mb->laplacianConstrainedPso;
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(pso);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -1;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -1;
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:bAdj offset:0 atIndex:6];
+        [enc setBuffer:bOff offset:0 atIndex:7];
+        [enc setBuffer:bVc offset:0 atIndex:8];
+        [enc setBuffer:bStr offset:0 atIndex:9];
+        [enc setBuffer:bFix offset:0 atIndex:10];
+
+        for (int it = 0; it < iterations; it++) {
+            const bool aIsSrc = (it % 2) == 0;
+            [enc setBuffer:(aIsSrc ? bAX : bBX) offset:0 atIndex:0];
+            [enc setBuffer:(aIsSrc ? bAY : bBY) offset:0 atIndex:1];
+            [enc setBuffer:(aIsSrc ? bAZ : bBZ) offset:0 atIndex:2];
+            [enc setBuffer:(aIsSrc ? bBX : bAX) offset:0 atIndex:3];
+            [enc setBuffer:(aIsSrc ? bBY : bAY) offset:0 atIndex:4];
+            [enc setBuffer:(aIsSrc ? bBZ : bAZ) offset:0 atIndex:5];
+            [enc dispatchThreads:MTLSizeMake(v, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            if (it < iterations - 1)
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        }
+
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    const bool resultInB = (iterations % 2) == 1;
+    memcpy(posX, [(resultInB ? bBX : bAX) contents], fbytes);
+    memcpy(posY, [(resultInB ? bBY : bAY) contents], fbytes);
+    memcpy(posZ, [(resultInB ? bBZ : bAZ) contents], fbytes);
     return 0;
 }
 

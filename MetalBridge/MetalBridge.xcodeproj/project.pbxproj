@@ -17,6 +17,7 @@
 		B20000000000000000000011 /* GradientMagnitude3D.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GradientMagnitude3D.metal; sourceTree = "<group>"; };
 		B20000000000000000000012 /* NormalizeContrast3D.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = NormalizeContrast3D.metal; sourceTree = "<group>"; };
 		B20000000000000000000013 /* ZeroVoxelBoundary.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = ZeroVoxelBoundary.metal; sourceTree = "<group>"; };
+		B20000000000000000000014 /* LaplacianConstrained.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LaplacianConstrained.metal; sourceTree = "<group>"; };
 		B30000000000000000000001 /* MetalBridge.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = MetalBridge.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -79,6 +80,7 @@
 				B20000000000000000000011 /* GradientMagnitude3D.metal */,
 				B20000000000000000000012 /* NormalizeContrast3D.metal */,
 				B20000000000000000000013 /* ZeroVoxelBoundary.metal */,
+				B20000000000000000000014 /* LaplacianConstrained.metal */,
 			);
 			path = Shaders;
 			sourceTree = "<group>";
