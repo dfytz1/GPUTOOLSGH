@@ -82,7 +82,7 @@ public static class MetalBridge
         [In] float[] rho,
         [In] float[] diag,
         [In] float[] f_rhs,
-        [In, Out] float[] u_inout,
+        float[] u_inout,
         float penalty,
         int nElem,
         int ndof,

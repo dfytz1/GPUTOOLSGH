@@ -2,6 +2,7 @@ using GHGPUPlugin.NativeInterop;
 using Rhino.Geometry;
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 namespace GHGPUPlugin.Chromodoris.Topology
 {
@@ -375,16 +376,37 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             diagGpu[i] = (float)diag[i];
                         }
 
-                        int pcgCode = MetalBridge.FemPcgSolve(
-                            gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
-                            (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
+                        var uHandle = GCHandle.Alloc(uGpu, GCHandleType.Pinned);
+                        int pcgCode;
+                        try
+                        {
+                            pcgCode = MetalBridge.FemPcgSolve(
+                                gpuCtx, Ke_flat, dofMapFlat, fixedBytes, rhoFlat, diagGpu, fGpu, uGpu,
+                                (float)Penalty, nElem, ndof, maxPcgIter, (float)tolRel);
+                        }
+                        finally
+                        {
+                            uHandle.Free();
+                        }
 
                         if (pcgCode == 0)
                         {
+                            double complianceCheck = 0;
                             for (int i = 0; i < ndof; i++)
-                                u[i] = uGpu[i];
-                            solvedGpuPcg = true;
-                            res.GpuPcgUsed = true;
+                                complianceCheck += uGpu[i] * fGpu[i];
+
+                            if (Math.Abs(complianceCheck) > 1e-30)
+                            {
+                                for (int i = 0; i < ndof; i++)
+                                    u[i] = uGpu[i];
+                                solvedGpuPcg = true;
+                                res.GpuPcgUsed = true;
+                            }
+                            else
+                            {
+                                if (outer == 0 && gpuFallbackMsg == null)
+                                    gpuFallbackMsg = "GPU_FALLBACK: FemPcgSolve returned zero displacement (bad solve), using CPU";
+                            }
                         }
                         else if (outer == 0 && gpuFallbackMsg == null)
                         {
