@@ -3,6 +3,7 @@
  */
 
 using GHGPUPlugin.Chromodoris.Topology;
+using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
@@ -18,7 +19,7 @@ namespace GHGPUPlugin.Chromodoris
     public class IsosurfaceSlComponent : GH_Component
     {
         public IsosurfaceSlComponent()
-          : base("Build IsoSurface SL", "IsoSL",
+          : base("Build IsoSurface SL GPU", "IsoSLGPU",
               "Same as Build IsoSurface. Optional S/L masks pin the field; optional SupportGeometry/LoadGeometry " +
               "(same as Voxel Paint) snap vertices onto those surfaces. CloseBoundary (default on) reapplies the " +
               "same outer-layer zero as Close Voxel Data after pinning so the box stays sealed.",
@@ -56,6 +57,9 @@ namespace GHGPUPlugin.Chromodoris
             pManager[9].Optional = true;
             pManager[10].Optional = true;
             pManager[11].Optional = true;
+            pManager.AddBooleanParameter("UseGPU", "GPU",
+                "Reserved — marching cubes is CPU-only in this build.", GH_ParamAccess.item, true);
+            pManager[12].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -113,6 +117,12 @@ namespace GHGPUPlugin.Chromodoris
                 pinDelta = 0;
             bool closeBoundary = true;
             DA.GetData(11, ref closeBoundary);
+            bool useGpu = true;
+            DA.GetData(12, ref useGpu);
+            NativeLoader.EnsureLoaded();
+            if (useGpu)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    "Marching cubes is CPU-only. GPU reserved for future release.");
 
             float[,,] support = new float[nx, ny, nz];
             float[,,] load = new float[nx, ny, nz];

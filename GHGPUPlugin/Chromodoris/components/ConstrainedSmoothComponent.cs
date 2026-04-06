@@ -1,7 +1,10 @@
 using GHGPUPlugin.Chromodoris.MeshTools;
+using GHGPUPlugin.MeshTopology;
+using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
 using System;
+using System.Diagnostics;
 
 namespace GHGPUPlugin.Chromodoris
 {
@@ -11,7 +14,7 @@ namespace GHGPUPlugin.Chromodoris
     public class ConstrainedSmoothComponent : GH_Component
     {
         public ConstrainedSmoothComponent()
-          : base("Smooth Masked", "SmoothMask",
+          : base("Smooth Masked GPU", "SmoothMaskGPU",
               "Laplacian smooth a mesh while locking vertices that fall in Support and/or Load voxels. " +
               "Wire the same BoundingBox, masks, and CellCentered flag as Build IsoSurface.",
               "GPUTools", "Mesh")
@@ -31,9 +34,13 @@ namespace GHGPUPlugin.Chromodoris
                 "Expand constraint region by this many voxel rings (0–3) so boundary vertices stay put.", GH_ParamAccess.item, 1);
             pManager.AddNumberParameter("StepSize", "St", "Laplacian step 0…1.", GH_ParamAccess.item, 0.5);
             pManager.AddIntegerParameter("Iterations", "I", "Smoothing iterations.", GH_ParamAccess.item, 1);
+            pManager.AddBooleanParameter("UseGPU", "GPU",
+                "Use Metal Laplacian per iteration; constraint mask re-applied in C# after each GPU pass.",
+                GH_ParamAccess.item, true);
             pManager[7].Optional = true;
             pManager[8].Optional = true;
             pManager[9].Optional = true;
+            pManager[10].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -60,6 +67,9 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(7, ref dilate);
             DA.GetData(8, ref step);
             DA.GetData(9, ref iterations);
+            bool useGpu = true;
+            DA.GetData(10, ref useGpu);
+            NativeLoader.EnsureLoaded();
 
             int nx = support.GetLength(0), ny = support.GetLength(1), nz = support.GetLength(2);
             if (load.GetLength(0) != nx || load.GetLength(1) != ny || load.GetLength(2) != nz)
@@ -114,8 +124,95 @@ namespace GHGPUPlugin.Chromodoris
             for (int i = 0; i < flags.Length; i++)
                 if (flags[i]) nLock++;
 
-            var smooth = new ConstrainedVertexSmooth(mesh, step, iterations, flags);
-            Mesh outMesh = smooth.Compute();
+            Mesh outMesh;
+            bool gpuOk = false;
+            var sw = Stopwatch.StartNew();
+
+            if (useGpu && MetalSharedContext.TryGetContext(out IntPtr ctx))
+            {
+                try
+                {
+                    int[][] neighbors = MeshTopologyNeighbors.NeighborsFromEdges(mesh);
+                    int nTopo = neighbors.Length;
+                    MeshTopologyNeighbors.ToCsr(neighbors, out int[] adjFlat, out int[] rowOffsets);
+
+                    var tv = mesh.TopologyVertices;
+                    var vx = new float[nTopo];
+                    var vy = new float[nTopo];
+                    var vz = new float[nTopo];
+                    for (int t = 0; t < nTopo; t++)
+                    {
+                        var p = tv[t];
+                        vx[t] = p.X;
+                        vy[t] = p.Y;
+                        vz[t] = p.Z;
+                    }
+
+                    var ox = new float[nTopo];
+                    var oy = new float[nTopo];
+                    var oz = new float[nTopo];
+                    var meshVertToTopo = new int[mesh.Vertices.Count];
+                    for (int ti = 0; ti < nTopo; ti++)
+                    {
+                        int[] mvInds = tv.MeshVertexIndices(ti);
+                        for (int k = 0; k < mvInds.Length; k++)
+                            meshVertToTopo[mvInds[k]] = ti;
+                    }
+
+                    for (int mv = 0; mv < mesh.Vertices.Count; mv++)
+                    {
+                        int ti = meshVertToTopo[mv];
+                        if (flags[ti])
+                        {
+                            var p = mesh.Vertices[mv];
+                            ox[ti] = (float)p.X;
+                            oy[ti] = (float)p.Y;
+                            oz[ti] = (float)p.Z;
+                        }
+                    }
+
+                    for (int it = 0; it < iterations; it++)
+                    {
+                        int code = MetalBridge.RunLaplacianIterations(
+                            ctx, vx, vy, vz, adjFlat, rowOffsets, nTopo, (float)step, 1);
+                        if (code != 0)
+                            throw new Exception($"RunLaplacianIterations returned {code}");
+                        for (int t = 0; t < nTopo; t++)
+                        {
+                            if (flags[t])
+                            {
+                                vx[t] = ox[t];
+                                vy[t] = oy[t];
+                                vz[t] = oz[t];
+                            }
+                        }
+                    }
+
+                    outMesh = mesh.DuplicateMesh();
+                    for (int mv = 0; mv < outMesh.Vertices.Count; mv++)
+                    {
+                        int ti = meshVertToTopo[mv];
+                        outMesh.Vertices.SetVertex(mv, vx[ti], vy[ti], vz[ti]);
+                    }
+
+                    outMesh.Normals.ComputeNormals();
+                    gpuOk = true;
+                }
+                catch (Exception ex)
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, $"GPU smooth failed: {ex.Message} — CPU fallback.");
+                    outMesh = new ConstrainedVertexSmooth(mesh, step, iterations, flags).Compute();
+                }
+            }
+            else
+            {
+                outMesh = new ConstrainedVertexSmooth(mesh, step, iterations, flags).Compute();
+            }
+
+            sw.Stop();
+            if (gpuOk)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    $"GPU constrained smooth ({sw.ElapsedMilliseconds} ms)");
 
             AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
                 $"Locked {nLock} / {flags.Length} topology vertices (support/load voxels × dilate).");

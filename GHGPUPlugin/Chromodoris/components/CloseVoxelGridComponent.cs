@@ -4,16 +4,18 @@
  */
 
 using GHGPUPlugin.Chromodoris.Topology;
+using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using System;
+using System.Diagnostics;
 
 namespace GHGPUPlugin.Chromodoris
 {
     public class CloseVoxelGridComponent : GH_Component
     {
         public CloseVoxelGridComponent()
-          : base("Close Voxel Data", "CloseVoxels",
+          : base("Close Voxel Data GPU", "CloseVoxelsGPU",
               "Caps voxel boundary values to zero, ensuring the resulting isosurface is a closed volume.",
               "GPUTools", "Voxel")
         {
@@ -22,6 +24,9 @@ namespace GHGPUPlugin.Chromodoris
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
             pManager.AddGenericParameter("VoxelData", "D", "The voxel data (float[x,y,z]) to close.", GH_ParamAccess.item);
+            pManager.AddBooleanParameter("UseGPU", "GPU",
+                "Use Metal GPU to zero boundary voxels. CPU fallback if unavailable.", GH_ParamAccess.item, true);
+            pManager[1].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -34,8 +39,32 @@ namespace GHGPUPlugin.Chromodoris
             if (!VoxelMaskGoo.TryGetFloatTensor3(DA, 0, this, out float[,,] inputData, "Voxel data"))
                 return;
 
+            bool useGpu = true;
+            DA.GetData(1, ref useGpu);
+            NativeLoader.EnsureLoaded();
+
+            int nx = inputData.GetLength(0), ny = inputData.GetLength(1), nz = inputData.GetLength(2);
             float[,,] result = (float[,,])inputData.Clone();
-            WorkflowAGrid.ZeroVoxelBoundaryInPlace(result);
+            bool gpuOk = false;
+            var sw = Stopwatch.StartNew();
+
+            if (useGpu)
+            {
+                float[] flat = VoxelGpuHelper.Flatten(result);
+                if (VoxelGpuHelper.TryZeroBoundaryGpu(this, flat, nx, ny, nz))
+                {
+                    result = VoxelGpuHelper.Unflatten(flat, nx, ny, nz);
+                    gpuOk = true;
+                }
+            }
+
+            if (!gpuOk)
+                WorkflowAGrid.ZeroVoxelBoundaryInPlace(result);
+
+            sw.Stop();
+            if (gpuOk)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    $"GPU boundary zero ({sw.ElapsedMilliseconds} ms)");
 
             DA.SetData(0, new GH_ObjectWrapper(result));
         }

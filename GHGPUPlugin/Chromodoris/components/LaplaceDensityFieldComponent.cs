@@ -1,8 +1,10 @@
 using GHGPUPlugin.Chromodoris.Topology;
+using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using System;
+using System.Diagnostics;
 
 namespace GHGPUPlugin.Chromodoris
 {
@@ -12,7 +14,7 @@ namespace GHGPUPlugin.Chromodoris
     public class LaplaceDensityFieldComponent : GH_Component
     {
         public LaplaceDensityFieldComponent()
-          : base("Laplace Field Density", "LaplaceDen",
+          : base("Laplace Field Density GPU", "LaplaceDenGPU",
               "Solves a Laplace field (support=0, load=1) inside the domain and builds a normalized density from |∇φ|. Wire B and D to Build IsoSurface.",
               "GPUTools", "Voxel")
         {
@@ -29,6 +31,9 @@ namespace GHGPUPlugin.Chromodoris
             pManager.AddNumberParameter("LoadPotential", "Vl", "Fixed scalar on load voxels.", GH_ParamAccess.item, 1.0);
             pManager.AddBooleanParameter("InvertDensity", "Inv", "If true, material proxy = 1 − normalized |∇φ|.", GH_ParamAccess.item, false);
             pManager.AddNumberParameter("ContrastExponent", "E", "Exponent on normalized density (1 = linear, above 1 = sharper).", GH_ParamAccess.item, 1.0);
+            pManager.AddBooleanParameter("UseGPU", "GPU",
+                "Use Metal GPU (M-chip). CPU fallback if unavailable.", GH_ParamAccess.item, true);
+            pManager[9].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -59,6 +64,9 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(6, ref vl);
             DA.GetData(7, ref invert);
             DA.GetData(8, ref contrast);
+            bool useGpu = true;
+            DA.GetData(9, ref useGpu);
+            NativeLoader.EnsureLoaded();
 
             if (inside == null || support == null || load == null)
             {
@@ -92,12 +100,46 @@ namespace GHGPUPlugin.Chromodoris
             double dy = box.Y.Length / ny;
             double dz = box.Z.Length / nz;
 
-            float[,,] phi = WorkflowAGrid.SolveLaplace(inside, support, load, nx, ny, nz, iterations, (float)vs, (float)vl);
-            float[,,] grad = WorkflowAGrid.GradientMagnitude(phi, inside, nx, ny, nz, dx, dy, dz);
+            int total = nx * ny * nz;
+            float iDx = (float)(1.0 / dx), iDy = (float)(1.0 / dy), iDz = (float)(1.0 / dz);
+            float[] fIn = VoxelGpuHelper.Flatten(inside);
+            float[] fSup = VoxelGpuHelper.Flatten(support);
+            float[] fLoa = VoxelGpuHelper.Flatten(load);
+            float[] fPhi = new float[total];
+            var sw = Stopwatch.StartNew();
 
-            float[,,] density = (float[,,])grad.Clone();
-            WorkflowAGrid.NormalizeToUnitInterval(density, inside, nx, ny, nz, invert);
-            WorkflowAGrid.ApplyContrast(density, inside, nx, ny, nz, contrast);
+            bool gpuPhi = useGpu && VoxelGpuHelper.TryLaplaceGpu(
+                this, fIn, fSup, fLoa, fPhi, nx, ny, nz, (float)vs, (float)vl, iterations);
+            if (!gpuPhi)
+                fPhi = VoxelGpuHelper.Flatten(WorkflowAGrid.SolveLaplace(
+                    inside, support, load, nx, ny, nz, iterations, (float)vs, (float)vl));
+
+            float[] fGrad = new float[total];
+            bool gpuGrad = useGpu && gpuPhi && VoxelGpuHelper.TryGradientGpu(
+                this, fPhi, fIn, fGrad, nx, ny, nz, iDx, iDy, iDz);
+            if (!gpuGrad)
+                fGrad = VoxelGpuHelper.Flatten(WorkflowAGrid.GradientMagnitude(
+                    VoxelGpuHelper.Unflatten(fPhi, nx, ny, nz), inside, nx, ny, nz, dx, dy, dz));
+
+            float[] fDen = (float[])fGrad.Clone();
+            VoxelGpuHelper.DomainMinMax(fDen, fIn, total, out float dMin, out float dMax);
+            bool gpuNorm = useGpu && gpuGrad && VoxelGpuHelper.TryNormalizeGpu(
+                this, fDen, fIn, nx, ny, nz, dMin, dMax, invert, contrast);
+            if (!gpuNorm)
+            {
+                var densArr = VoxelGpuHelper.Unflatten(fDen, nx, ny, nz);
+                WorkflowAGrid.NormalizeToUnitInterval(densArr, inside, nx, ny, nz, invert);
+                WorkflowAGrid.ApplyContrast(densArr, inside, nx, ny, nz, contrast);
+                fDen = VoxelGpuHelper.Flatten(densArr);
+            }
+
+            sw.Stop();
+            if (gpuPhi)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    $"GPU Laplace+Gradient+Normalize ({sw.ElapsedMilliseconds} ms)");
+
+            float[,,] phi = VoxelGpuHelper.Unflatten(fPhi, nx, ny, nz);
+            float[,,] density = VoxelGpuHelper.Unflatten(fDen, nx, ny, nz);
 
             DA.SetData(0, new GH_ObjectWrapper(phi));
             DA.SetData(1, new GH_ObjectWrapper(density));

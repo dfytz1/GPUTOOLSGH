@@ -109,4 +109,52 @@ public static class MetalBridge
         [Out] int[] edgeU,
         [Out] int[] edgeV,
         [Out] float[] edgeW);
+
+    [DllImport(LibName, EntryPoint = "mb_laplace_jacobi_3d", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int LaplaceJacobi3D(
+        IntPtr ctx,
+        [In] float[] inside,
+        [In] float[] support,
+        [In] float[] load,
+        [In, Out] float[] phi,
+        int nx,
+        int ny,
+        int nz,
+        float supportVal,
+        float loadVal,
+        int iterations);
+
+    [DllImport(LibName, EntryPoint = "mb_gradient_magnitude_3d", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int GradientMagnitude3D(
+        IntPtr ctx,
+        [In] float[] phi,
+        [In] float[] inside,
+        [Out] float[] gradOut,
+        int nx,
+        int ny,
+        int nz,
+        float invDx,
+        float invDy,
+        float invDz);
+
+    [DllImport(LibName, EntryPoint = "mb_normalize_contrast_3d", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int NormalizeContrast3D(
+        IntPtr ctx,
+        [In, Out] float[] dataInOut,
+        [In] float[] inside,
+        int nx,
+        int ny,
+        int nz,
+        float domainMin,
+        float domainMax,
+        int invert,
+        float exponent);
+
+    [DllImport(LibName, EntryPoint = "mb_zero_voxel_boundary", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int ZeroVoxelBoundary(
+        IntPtr ctx,
+        [In, Out] float[] data,
+        int nx,
+        int ny,
+        int nz);
 }

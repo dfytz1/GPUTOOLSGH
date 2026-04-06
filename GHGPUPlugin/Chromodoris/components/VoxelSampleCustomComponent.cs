@@ -14,7 +14,7 @@ namespace GHGPUPlugin.Chromodoris
     public class VoxelSampleCustomComponent : GH_Component
     {
         public VoxelSampleCustomComponent()
-          : base("Sample Voxels (Custom)", "VoxelSampleCustom",
+          : base("Sample Voxels GPU (Custom)", "VoxelSampleCustomGPU",
               "Construct and sample a voxel grid from a point cloud using a custom box and explicit resolution.",
               "GPUTools", "Voxel")
         {

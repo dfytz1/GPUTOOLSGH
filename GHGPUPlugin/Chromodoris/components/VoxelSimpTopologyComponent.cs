@@ -13,7 +13,7 @@ namespace GHGPUPlugin.Chromodoris
     public class VoxelSimpTopologyComponent : GH_Component
     {
         public VoxelSimpTopologyComponent()
-          : base("Voxel SIMP Topology", "VoxelSIMP",
+          : base("Voxel SIMP Topology GPU", "VoxelSIMPGPU",
               "SIMP on a coarse voxel stride (fast), then trilinear upsample to mask resolution for smooth iso. " +
               "Same masks as Laplace workflow. Not validated FEA. Use SolveStride 2–4 for speed.",
               "GPUTools", "Voxel")

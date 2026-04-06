@@ -105,6 +105,46 @@ int mb_build_weighted_edges_csr(
     int* edgeV,
     float* edgeW);
 
+/// 3D Jacobi Laplace on a regular grid; @p phi is read/written (length nx*ny*nz, layout i-major).
+int mb_laplace_jacobi_3d(
+    void* ctx,
+    float* inside,
+    float* support,
+    float* load,
+    float* phi,
+    int nx,
+    int ny,
+    int nz,
+    float supportVal,
+    float loadVal,
+    int iterations);
+
+int mb_gradient_magnitude_3d(
+    void* ctx,
+    float* phi,
+    float* inside,
+    float* gradOut,
+    int nx,
+    int ny,
+    int nz,
+    float invDx,
+    float invDy,
+    float invDz);
+
+int mb_normalize_contrast_3d(
+    void* ctx,
+    float* dataInOut,
+    float* inside,
+    int nx,
+    int ny,
+    int nz,
+    float domainMin,
+    float domainMax,
+    int invert,
+    float exponent);
+
+int mb_zero_voxel_boundary(void* ctx, float* data, int nx, int ny, int nz);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,8 +1,10 @@
 using GHGPUPlugin.Chromodoris.Topology;
+using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using System;
+using System.Diagnostics;
 
 namespace GHGPUPlugin.Chromodoris
 {
@@ -12,7 +14,7 @@ namespace GHGPUPlugin.Chromodoris
     public class LaplaceProximityDensityComponent : GH_Component
     {
         public LaplaceProximityDensityComponent()
-          : base("Laplace + Proximity Density", "LaplaceProx",
+          : base("Laplace + Proximity Density GPU", "LaplaceProxGPU",
               "Same Laplace field as Laplace Field Density, plus a blend toward exp(-d/R) from supports/loads " +
               "and optional exp(-d/Rc) from the box center. Rsl≤0 disables SL term (center only); Rsl=0 auto (≈15% box diagonal).",
               "GPUTools", "Voxel")
@@ -36,7 +38,10 @@ namespace GHGPUPlugin.Chromodoris
                 GH_ParamAccess.item, 0.0);
             pManager.AddNumberParameter("CenterWeight", "Wc", "Weight for box-center proximity (0 = off that term).", GH_ParamAccess.item, 0.25);
             pManager.AddNumberParameter("CenterRadius", "Rc", "World falloff from box center; 0 = disable center term.", GH_ParamAccess.item, 0.0);
+            pManager.AddBooleanParameter("UseGPU", "GPU",
+                "Use Metal GPU for Laplace solve and gradient. CPU fallback if unavailable.", GH_ParamAccess.item, true);
             pManager[12].Optional = true;
+            pManager[13].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -67,6 +72,9 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(10, ref rslInput);
             DA.GetData(11, ref wc);
             DA.GetData(12, ref rc);
+            bool useGpu = true;
+            DA.GetData(13, ref useGpu);
+            NativeLoader.EnsureLoaded();
 
             int nx = inside.GetLength(0), ny = inside.GetLength(1), nz = inside.GetLength(2);
             if (support.GetLength(0) != nx || load.GetLength(0) != nx ||
@@ -87,8 +95,31 @@ namespace GHGPUPlugin.Chromodoris
             double dy = box.Y.Length / ny;
             double dz = box.Z.Length / nz;
 
-            float[,,] phi = WorkflowAGrid.SolveLaplace(inside, support, load, nx, ny, nz, iterations, (float)vs, (float)vl);
-            float[,,] grad = WorkflowAGrid.GradientMagnitude(phi, inside, nx, ny, nz, dx, dy, dz);
+            int total = nx * ny * nz;
+            float iDx = (float)(1.0 / dx), iDy = (float)(1.0 / dy), iDz = (float)(1.0 / dz);
+            float[] fIn = VoxelGpuHelper.Flatten(inside);
+            float[] fSup = VoxelGpuHelper.Flatten(support);
+            float[] fLoa = VoxelGpuHelper.Flatten(load);
+            float[] fPhi = new float[total];
+            var sw = Stopwatch.StartNew();
+
+            bool gpuPhi = useGpu && VoxelGpuHelper.TryLaplaceGpu(
+                this, fIn, fSup, fLoa, fPhi, nx, ny, nz, (float)vs, (float)vl, iterations);
+            float[,,] phi = gpuPhi
+                ? VoxelGpuHelper.Unflatten(fPhi, nx, ny, nz)
+                : WorkflowAGrid.SolveLaplace(inside, support, load, nx, ny, nz, iterations, (float)vs, (float)vl);
+
+            float[] fGrad = new float[total];
+            bool gpuGrad = useGpu && gpuPhi && VoxelGpuHelper.TryGradientGpu(
+                this, VoxelGpuHelper.Flatten(phi), fIn, fGrad, nx, ny, nz, iDx, iDy, iDz);
+            float[,,] grad = gpuGrad
+                ? VoxelGpuHelper.Unflatten(fGrad, nx, ny, nz)
+                : WorkflowAGrid.GradientMagnitude(phi, inside, nx, ny, nz, dx, dy, dz);
+
+            sw.Stop();
+            if (gpuPhi)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    $"GPU Laplace+Gradient ({sw.ElapsedMilliseconds} ms)");
 
             float[,,] laplaceD = (float[,,])grad.Clone();
             WorkflowAGrid.NormalizeToUnitInterval(laplaceD, inside, nx, ny, nz, inv);
