@@ -85,16 +85,12 @@ public class GH_ClosestPointPoints : GH_Component
         var outIdx = new int[qn];
 
         bool ranGpu = false;
-        if (useGpu && NativeLoader.IsMetalAvailable)
+        if (useGpu)
         {
-            if (!MetalSharedContext.TryGetContext(out IntPtr ctx))
-            {
-                AddRuntimeMessage(
-                    GH_RuntimeMessageLevel.Error,
-                    "Metal context could not be created.");
+            if (!MetalGuard.EnsureReady(this))
                 return;
-            }
 
+            MetalSharedContext.TryGetContext(out IntPtr ctx);
             int code = MetalBridge.ClosestPointsCloud(
                 ctx,
                 qx,
@@ -123,11 +119,11 @@ public class GH_ClosestPointPoints : GH_Component
 
         if (!ranGpu)
         {
-            if (useGpu && !NativeLoader.IsMetalAvailable)
+            if (useGpu)
             {
                 AddRuntimeMessage(
                     GH_RuntimeMessageLevel.Warning,
-                    "Metal not available — using CPU parallel search.");
+                    "GPU search did not run — using CPU parallel search.");
             }
 
             var opts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };

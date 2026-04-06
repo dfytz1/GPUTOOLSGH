@@ -86,16 +86,12 @@ public class GH_LaplacianSmooth : GH_Component
         var opts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
 
         bool ranGpu = false;
-        if (useGpu && NativeLoader.IsMetalAvailable)
+        if (useGpu)
         {
-            if (!MetalSharedContext.TryGetContext(out IntPtr ctx))
-            {
-                AddRuntimeMessage(
-                    GH_RuntimeMessageLevel.Error,
-                    "Metal context could not be created.");
+            if (!MetalGuard.EnsureReady(this))
                 return;
-            }
 
+            MetalSharedContext.TryGetContext(out IntPtr ctx);
             var x = new float[n];
             var y = new float[n];
             var z = new float[n];
@@ -125,11 +121,11 @@ public class GH_LaplacianSmooth : GH_Component
 
         if (!ranGpu)
         {
-            if (useGpu && !NativeLoader.IsMetalAvailable)
+            if (useGpu)
             {
                 AddRuntimeMessage(
                     GH_RuntimeMessageLevel.Warning,
-                    "Metal not available — using CPU (Chromodoris-style parallel).");
+                    "GPU Laplacian did not run — using CPU (Chromodoris-style parallel).");
             }
 
             for (int it = 0; it < iterations; it++)

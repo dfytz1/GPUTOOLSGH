@@ -24,7 +24,6 @@ public class GH_JFADelaunay2D : GH_Component
         pm.AddPointParameter("Points", "P", "Input points (projected to the plane).", GH_ParamAccess.list);
         pm.AddPlaneParameter("Plane", "Pl", "Projection plane.", GH_ParamAccess.item, Plane.WorldXY);
         pm.AddIntegerParameter("GridResolution", "GridRes", "Minimum JFA grid size; snapped up to next power of two (e.g. 512).", GH_ParamAccess.item, 512);
-        pm.AddBooleanParameter("UseGPU", "UseGPU", "Must be true; JFA runs only on Metal.", GH_ParamAccess.item, true);
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pm)
@@ -36,14 +35,8 @@ public class GH_JFADelaunay2D : GH_Component
     protected override void SolveInstance(IGH_DataAccess DA)
     {
         NativeLoader.EnsureLoaded();
-
-        bool useGpu = true;
-        DA.GetData("UseGPU", ref useGpu);
-        if (!useGpu)
-        {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "UseGPU is false — JFA Delaunay requires Metal.");
+        if (!MetalGuard.EnsureReady(this))
             return;
-        }
 
         var points = new List<Point3d>();
         if (!DA.GetDataList("Points", points) || points.Count < 3)
@@ -97,19 +90,8 @@ public class GH_JFADelaunay2D : GH_Component
         var outA = new int[maxEdges];
         var outB = new int[maxEdges];
 
-        if (!NativeLoader.IsMetalAvailable)
-        {
-            string err = NativeLoader.LoadError ?? "Metal native library not loaded.";
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, err);
-            return;
-        }
-
         if (!MetalSharedContext.TryGetContext(out IntPtr ctx))
-        {
-            string err = MetalSharedContext.InitError ?? "Metal context unavailable.";
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, err);
             return;
-        }
 
         int code = MetalBridge.JfaDelaunay2D(ctx, uv, vv, points.Count, outA, outB, out int edgeCount, maxEdges, gridRes);
         if (code != 0)

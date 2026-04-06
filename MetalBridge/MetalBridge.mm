@@ -70,6 +70,18 @@ struct MBContext {
     id<MTLBuffer> cpCloudOutI = nil;
     int cpCloudCachedTargetCount = -1;
     int cpCloudCachedQueryCount = -1;
+
+    // JFA cache
+    id<MTLBuffer> jfaGridA = nil;
+    id<MTLBuffer> jfaGridB = nil;
+    id<MTLBuffer> jfaBPx = nil;
+    id<MTLBuffer> jfaBPy = nil;
+    id<MTLBuffer> jfaBN = nil;
+    id<MTLBuffer> jfaBRes = nil;
+    id<MTLBuffer> jfaBEdges = nil;
+    id<MTLBuffer> jfaBStep = nil;
+    int jfaCachedPointCount = -1;
+    int jfaCachedResolution = -1;
 };
 
 void ReleaseCpMeshCache(MBContext* mb)
@@ -89,6 +101,15 @@ void ReleaseCpCloudCache(MBContext* mb)
     mb->cpCloudQc = mb->cpCloudTc = nil;
     mb->cpCloudOutX = mb->cpCloudOutY = mb->cpCloudOutZ = mb->cpCloudOutD = mb->cpCloudOutI = nil;
     mb->cpCloudCachedTargetCount = mb->cpCloudCachedQueryCount = -1;
+}
+
+void ReleaseJfaCache(MBContext* mb)
+{
+    mb->jfaGridA = mb->jfaGridB = nil;
+    mb->jfaBPx = mb->jfaBPy = nil;
+    mb->jfaBN = mb->jfaBRes = nil;
+    mb->jfaBEdges = mb->jfaBStep = nil;
+    mb->jfaCachedPointCount = mb->jfaCachedResolution = -1;
 }
 
 NSString* MetallibPathBesideDylib()
@@ -188,6 +209,7 @@ void mb_destroy_context(void* ctx)
     mb->lapCachedVertexCount = mb->lapCachedNnz = -1;
     ReleaseCpMeshCache(mb);
     ReleaseCpCloudCache(mb);
+    ReleaseJfaCache(mb);
     mb->queue = nil;
     mb->device = nil;
     delete mb;
@@ -428,6 +450,8 @@ int mb_run_laplacian_iterations(
         [enc setBuffer:mb->lapStr offset:0 atIndex:9];
 
         for (int it = 0; it < iterations; it++) {
+            if (it > 0)
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             const bool readA = (it % 2) == 0;
             id<MTLBuffer> inX = readA ? mb->lapBxIn : mb->lapBxOut;
             id<MTLBuffer> inY = readA ? mb->lapByIn : mb->lapByOut;
@@ -494,16 +518,37 @@ int mb_closest_points_mesh(
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
 
-    const bool needRealloc = mb->cpMeshCachedVertexCount != vertexCount || mb->cpMeshCachedTriCount != triangleCount
-        || mb->cpMeshCachedQueryCount != queryCount;
+    const bool meshGeomChanged = mb->cpMeshCachedVertexCount != vertexCount || mb->cpMeshCachedTriCount != triangleCount;
+    const bool meshQueryChanged = mb->cpMeshCachedQueryCount != queryCount;
 
-    if (needRealloc) {
-        ReleaseCpMeshCache(mb);
+    if (meshGeomChanged) {
+        mb->cpMeshVx = mb->cpMeshVy = mb->cpMeshVz = nil;
+        mb->cpMeshTri = nil;
+        mb->cpMeshCachedVertexCount = mb->cpMeshCachedTriCount = -1;
+    }
+    if (meshQueryChanged) {
+        mb->cpMeshQx = mb->cpMeshQy = mb->cpMeshQz = nil;
+        mb->cpMeshQc = mb->cpMeshTc = nil;
+        mb->cpMeshOutX = mb->cpMeshOutY = mb->cpMeshOutZ = mb->cpMeshOutD = mb->cpMeshOutI = nil;
+        mb->cpMeshCachedQueryCount = -1;
+    }
 
+    if (mb->cpMeshVx == nil) {
         mb->cpMeshVx = [mb->device newBufferWithLength:vbytes options:opts];
         mb->cpMeshVy = [mb->device newBufferWithLength:vbytes options:opts];
         mb->cpMeshVz = [mb->device newBufferWithLength:vbytes options:opts];
         mb->cpMeshTri = [mb->device newBufferWithLength:triIdxBytes options:opts];
+        if (mb->cpMeshVx == nil || mb->cpMeshVy == nil || mb->cpMeshVz == nil || mb->cpMeshTri == nil)
+            return -32;
+        memcpy([mb->cpMeshVx contents], vx, vbytes);
+        memcpy([mb->cpMeshVy contents], vy, vbytes);
+        memcpy([mb->cpMeshVz contents], vz, vbytes);
+        memcpy([mb->cpMeshTri contents], triIndices, triIdxBytes);
+        mb->cpMeshCachedVertexCount = vertexCount;
+        mb->cpMeshCachedTriCount = triangleCount;
+    }
+
+    if (mb->cpMeshQx == nil) {
         mb->cpMeshQx = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpMeshQy = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpMeshQz = [mb->device newBufferWithLength:qbytes options:opts];
@@ -514,19 +559,10 @@ int mb_closest_points_mesh(
         mb->cpMeshOutZ = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpMeshOutD = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpMeshOutI = [mb->device newBufferWithLength:qc * sizeof(int) options:opts];
-
-        if (mb->cpMeshVx == nil || mb->cpMeshVy == nil || mb->cpMeshVz == nil || mb->cpMeshTri == nil || mb->cpMeshQx == nil
-            || mb->cpMeshQy == nil || mb->cpMeshQz == nil || mb->cpMeshQc == nil || mb->cpMeshTc == nil || mb->cpMeshOutX == nil
-            || mb->cpMeshOutY == nil || mb->cpMeshOutZ == nil || mb->cpMeshOutD == nil || mb->cpMeshOutI == nil)
+        if (mb->cpMeshQx == nil || mb->cpMeshQy == nil || mb->cpMeshQz == nil || mb->cpMeshQc == nil || mb->cpMeshTc == nil
+            || mb->cpMeshOutX == nil || mb->cpMeshOutY == nil || mb->cpMeshOutZ == nil || mb->cpMeshOutD == nil
+            || mb->cpMeshOutI == nil)
             return -32;
-
-        memcpy([mb->cpMeshVx contents], vx, vbytes);
-        memcpy([mb->cpMeshVy contents], vy, vbytes);
-        memcpy([mb->cpMeshVz contents], vz, vbytes);
-        memcpy([mb->cpMeshTri contents], triIndices, triIdxBytes);
-
-        mb->cpMeshCachedVertexCount = vertexCount;
-        mb->cpMeshCachedTriCount = triangleCount;
         mb->cpMeshCachedQueryCount = queryCount;
     }
 
@@ -610,14 +646,33 @@ int mb_closest_points_cloud(
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
 
-    const bool needRealloc = mb->cpCloudCachedTargetCount != targetCount || mb->cpCloudCachedQueryCount != queryCount;
+    const bool cloudTargetChanged = mb->cpCloudCachedTargetCount != targetCount;
+    const bool cloudQueryChanged = mb->cpCloudCachedQueryCount != queryCount;
 
-    if (needRealloc) {
-        ReleaseCpCloudCache(mb);
+    if (cloudTargetChanged) {
+        mb->cpCloudPx = mb->cpCloudPy = mb->cpCloudPz = nil;
+        mb->cpCloudCachedTargetCount = -1;
+    }
+    if (cloudQueryChanged) {
+        mb->cpCloudQx = mb->cpCloudQy = mb->cpCloudQz = nil;
+        mb->cpCloudQc = mb->cpCloudTc = nil;
+        mb->cpCloudOutX = mb->cpCloudOutY = mb->cpCloudOutZ = mb->cpCloudOutD = mb->cpCloudOutI = nil;
+        mb->cpCloudCachedQueryCount = -1;
+    }
 
+    if (mb->cpCloudPx == nil) {
         mb->cpCloudPx = [mb->device newBufferWithLength:tbytes options:opts];
         mb->cpCloudPy = [mb->device newBufferWithLength:tbytes options:opts];
         mb->cpCloudPz = [mb->device newBufferWithLength:tbytes options:opts];
+        if (mb->cpCloudPx == nil || mb->cpCloudPy == nil || mb->cpCloudPz == nil)
+            return -42;
+        memcpy([mb->cpCloudPx contents], px, tbytes);
+        memcpy([mb->cpCloudPy contents], py, tbytes);
+        memcpy([mb->cpCloudPz contents], pz, tbytes);
+        mb->cpCloudCachedTargetCount = targetCount;
+    }
+
+    if (mb->cpCloudQx == nil) {
         mb->cpCloudQx = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpCloudQy = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpCloudQz = [mb->device newBufferWithLength:qbytes options:opts];
@@ -628,17 +683,10 @@ int mb_closest_points_cloud(
         mb->cpCloudOutZ = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpCloudOutD = [mb->device newBufferWithLength:qbytes options:opts];
         mb->cpCloudOutI = [mb->device newBufferWithLength:qc * sizeof(int) options:opts];
-
-        if (mb->cpCloudPx == nil || mb->cpCloudPy == nil || mb->cpCloudPz == nil || mb->cpCloudQx == nil || mb->cpCloudQy == nil
-            || mb->cpCloudQz == nil || mb->cpCloudQc == nil || mb->cpCloudTc == nil || mb->cpCloudOutX == nil
-            || mb->cpCloudOutY == nil || mb->cpCloudOutZ == nil || mb->cpCloudOutD == nil || mb->cpCloudOutI == nil)
+        if (mb->cpCloudQx == nil || mb->cpCloudQy == nil || mb->cpCloudQz == nil || mb->cpCloudQc == nil || mb->cpCloudTc == nil
+            || mb->cpCloudOutX == nil || mb->cpCloudOutY == nil || mb->cpCloudOutZ == nil || mb->cpCloudOutD == nil
+            || mb->cpCloudOutI == nil)
             return -42;
-
-        memcpy([mb->cpCloudPx contents], px, tbytes);
-        memcpy([mb->cpCloudPy contents], py, tbytes);
-        memcpy([mb->cpCloudPz contents], pz, tbytes);
-
-        mb->cpCloudCachedTargetCount = targetCount;
         mb->cpCloudCachedQueryCount = queryCount;
     }
 
@@ -719,20 +767,30 @@ int mb_jfa_delaunay_2d(
 
     MTLResourceOptions opts = MTLResourceStorageModeShared;
 
-    id<MTLBuffer> bGridA = [mb->device newBufferWithLength:gridBytes options:opts];
-    id<MTLBuffer> bGridB = [mb->device newBufferWithLength:gridBytes options:opts];
-    id<MTLBuffer> bPx = [mb->device newBufferWithBytes:px length:pBytes options:opts];
-    id<MTLBuffer> bPy = [mb->device newBufferWithBytes:py length:pBytes options:opts];
-    id<MTLBuffer> bN = [mb->device newBufferWithBytes:&pointCount length:sizeof(int) options:opts];
-    id<MTLBuffer> bRes = [mb->device newBufferWithBytes:&res length:sizeof(int) options:opts];
-    id<MTLBuffer> bEdges = [mb->device newBufferWithLength:edgeBytes options:opts];
-    id<MTLBuffer> bStep = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    const bool jfaNeedsRealloc = mb->jfaCachedPointCount != pointCount || mb->jfaCachedResolution != res;
+    if (jfaNeedsRealloc) {
+        ReleaseJfaCache(mb);
+        mb->jfaGridA = [mb->device newBufferWithLength:gridBytes options:opts];
+        mb->jfaGridB = [mb->device newBufferWithLength:gridBytes options:opts];
+        mb->jfaBPx = [mb->device newBufferWithLength:pBytes options:opts];
+        mb->jfaBPy = [mb->device newBufferWithLength:pBytes options:opts];
+        mb->jfaBN = [mb->device newBufferWithLength:sizeof(int) options:opts];
+        mb->jfaBRes = [mb->device newBufferWithLength:sizeof(int) options:opts];
+        mb->jfaBEdges = [mb->device newBufferWithLength:edgeBytes options:opts];
+        mb->jfaBStep = [mb->device newBufferWithLength:sizeof(int) options:opts];
+        if (mb->jfaGridA == nil || mb->jfaGridB == nil || mb->jfaBPx == nil || mb->jfaBPy == nil || mb->jfaBN == nil
+            || mb->jfaBRes == nil || mb->jfaBEdges == nil || mb->jfaBStep == nil)
+            return -72;
+        memcpy([mb->jfaBPx contents], px, pBytes);
+        memcpy([mb->jfaBPy contents], py, pBytes);
+        memcpy([mb->jfaBN contents], &pointCount, sizeof(int));
+        memcpy([mb->jfaBRes contents], &res, sizeof(int));
+        mb->jfaCachedPointCount = pointCount;
+        mb->jfaCachedResolution = res;
+    }
 
-    if (bGridA == nil || bGridB == nil || bPx == nil || bPy == nil || bN == nil || bRes == nil || bEdges == nil || bStep == nil)
-        return -72;
-
-    memset([bGridA contents], 0xFF, gridBytes);
-    memset([bGridB contents], 0xFF, gridBytes);
+    memset([mb->jfaGridA contents], 0xFF, gridBytes);
+    memset([mb->jfaGridB contents], 0xFF, gridBytes);
 
     const NSUInteger maxTpgInit = mb->jfaInitPso.maxTotalThreadsPerThreadgroup;
     const NSUInteger tpgInit = MIN(maxTpgInit, 256UL);
@@ -748,27 +806,27 @@ int mb_jfa_delaunay_2d(
             return -74;
 
         [enc setComputePipelineState:mb->jfaInitPso];
-        [enc setBuffer:bGridA offset:0 atIndex:0];
-        [enc setBuffer:bPx offset:0 atIndex:1];
-        [enc setBuffer:bPy offset:0 atIndex:2];
-        [enc setBuffer:bN offset:0 atIndex:3];
-        [enc setBuffer:bRes offset:0 atIndex:4];
+        [enc setBuffer:mb->jfaGridA offset:0 atIndex:0];
+        [enc setBuffer:mb->jfaBPx offset:0 atIndex:1];
+        [enc setBuffer:mb->jfaBPy offset:0 atIndex:2];
+        [enc setBuffer:mb->jfaBN offset:0 atIndex:3];
+        [enc setBuffer:mb->jfaBRes offset:0 atIndex:4];
         [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(pointCount), 1, 1)
          threadsPerThreadgroup:MTLSizeMake(tpgInit, 1, 1)];
 
         int step = res / 2;
-        id<MTLBuffer> src = bGridA;
-        id<MTLBuffer> dst = bGridB;
+        id<MTLBuffer> src = mb->jfaGridA;
+        id<MTLBuffer> dst = mb->jfaGridB;
 
         while (step >= 1) {
-            memcpy([bStep contents], &step, sizeof(int));
+            memcpy([mb->jfaBStep contents], &step, sizeof(int));
             [enc setComputePipelineState:mb->jfaStepPso];
             [enc setBuffer:src offset:0 atIndex:0];
             [enc setBuffer:dst offset:0 atIndex:1];
-            [enc setBuffer:bPx offset:0 atIndex:2];
-            [enc setBuffer:bPy offset:0 atIndex:3];
-            [enc setBuffer:bStep offset:0 atIndex:4];
-            [enc setBuffer:bRes offset:0 atIndex:5];
+            [enc setBuffer:mb->jfaBPx offset:0 atIndex:2];
+            [enc setBuffer:mb->jfaBPy offset:0 atIndex:3];
+            [enc setBuffer:mb->jfaBStep offset:0 atIndex:4];
+            [enc setBuffer:mb->jfaBRes offset:0 atIndex:5];
             [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(res), static_cast<NSUInteger>(res), 1)
              threadsPerThreadgroup:MTLSizeMake(tpg2d, tpg2d, 1)];
 
@@ -780,8 +838,8 @@ int mb_jfa_delaunay_2d(
 
         [enc setComputePipelineState:mb->jfaEdgePso];
         [enc setBuffer:src offset:0 atIndex:0];
-        [enc setBuffer:bEdges offset:0 atIndex:1];
-        [enc setBuffer:bRes offset:0 atIndex:2];
+        [enc setBuffer:mb->jfaBEdges offset:0 atIndex:1];
+        [enc setBuffer:mb->jfaBRes offset:0 atIndex:2];
         [enc dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(res), static_cast<NSUInteger>(res), 1)
          threadsPerThreadgroup:MTLSizeMake(tpg2d, tpg2d, 1)];
 
@@ -790,7 +848,7 @@ int mb_jfa_delaunay_2d(
         [cmd waitUntilCompleted];
     }
 
-    const int* rawEdges = static_cast<const int*>([bEdges contents]);
+    const int* rawEdges = static_cast<const int*>([mb->jfaBEdges contents]);
     const NSUInteger totalCells = cellCount;
 
     std::vector<std::pair<int, int>> edgeSet;

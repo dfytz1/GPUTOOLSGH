@@ -80,18 +80,14 @@ public class GH_ShortestRouteGPU : GH_Component
         bool useGpu = true;
         DA.GetData("UseGPU", ref useGpu);
 
+        if (useGpu && !MetalGuard.EnsureReady(this))
+            return;
+
         if (!MeshShortestPath.TryDijkstraTopology(mesh, start, end, useGpu, out List<Point3d>? path, out double length, out string? err)
             || path == null)
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Error, err ?? "Shortest path failed.");
             return;
-        }
-
-        if (useGpu && !NativeLoader.IsMetalAvailable)
-        {
-            AddRuntimeMessage(
-                GH_RuntimeMessageLevel.Warning,
-                "Metal not available — edge weights computed on CPU.");
         }
 
         Polyline pl = path.Count == 1 ? new Polyline(new[] { path[0], path[0] }) : new Polyline(path);

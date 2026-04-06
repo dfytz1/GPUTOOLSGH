@@ -112,16 +112,12 @@ public class GH_ClosestPointGPU : GH_Component
         var outTi = new int[qn];
 
         bool ranGpu = false;
-        if (useGpu && NativeLoader.IsMetalAvailable)
+        if (useGpu)
         {
-            if (!MetalSharedContext.TryGetContext(out IntPtr ctx))
-            {
-                AddRuntimeMessage(
-                    GH_RuntimeMessageLevel.Error,
-                    "Metal context could not be created; cannot run GPU closest point.");
+            if (!MetalGuard.EnsureReady(this))
                 return;
-            }
 
+            MetalSharedContext.TryGetContext(out IntPtr ctx);
             int code = MetalBridge.ClosestPointsMesh(
                 ctx,
                 qx,
@@ -152,11 +148,11 @@ public class GH_ClosestPointGPU : GH_Component
 
         if (!ranGpu)
         {
-            if (useGpu && !NativeLoader.IsMetalAvailable)
+            if (useGpu)
             {
                 AddRuntimeMessage(
                     GH_RuntimeMessageLevel.Warning,
-                    "Metal not available — using Rhino mesh closest point.");
+                    "GPU closest point did not run — using Rhino mesh closest point.");
             }
 
             for (int i = 0; i < qn; i++)

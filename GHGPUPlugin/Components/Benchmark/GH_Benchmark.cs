@@ -108,15 +108,14 @@ public class GH_Benchmark : GH_Component
                     "UseGPU is false — running CPU parallel instead of Metal.");
                 RunCpuMatmul(buffer, n);
             }
-            else if (!NativeLoader.IsMetalAvailable)
-            {
-                AddRuntimeMessage(
-                    GH_RuntimeMessageLevel.Warning,
-                    "Metal not available — falling back to CPU parallel.");
-                RunCpuMatmul(buffer, n);
-            }
             else
             {
+                if (!MetalGuard.EnsureReady(this))
+                {
+                    sw.Stop();
+                    return;
+                }
+
                 int code = RunMetalBenchmark(buffer, n);
                 if (code != 0)
                 {
