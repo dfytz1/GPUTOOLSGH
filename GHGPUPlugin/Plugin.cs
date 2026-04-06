@@ -1,5 +1,6 @@
 using System.Drawing;
 using Grasshopper.Kernel;
+using GHGPUPlugin.Chromodoris;
 using GHGPUPlugin.NativeInterop;
 
 namespace GHGPUPlugin;
@@ -28,6 +29,7 @@ public class Plugin : GH_AssemblyInfo
     {
         NativeLoader.EnsureLoaded();
         AccelerateInterop.EnsureLoaded();
+        _ = GrasshopperVoxelTabRegistration.ComponentTypes.Length;
         _ = _finalizer;
     }
 

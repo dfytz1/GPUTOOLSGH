@@ -25,8 +25,8 @@ namespace GHGPUPlugin.Chromodoris.Topology
             public int PcgFallbackCode;    // last non-zero pcgCode, 0 if never failed
             public string DiagMessage;     // detailed diagnostic string
             public string GpuDiagPreSolve; // first-iteration snapshot of GPU inputs
-            /// <summary>Per-outer-iteration design variable x[e] before OC update; null if not recorded.</summary>
-            public List<double[]> DensityHistory;
+            /// <summary>Fine-grid upsampled density (same layout as DensityPhys) before each OC update; null if not recorded.</summary>
+            public List<float[,,]> DensityHistory;
             /// <summary>Compliance f·u after each outer iteration linear solve.</summary>
             public List<double> IterationCompliance = new List<double>();
         }
@@ -36,7 +36,12 @@ namespace GHGPUPlugin.Chromodoris.Topology
             float[,,] supportFine,
             float[,,] loadFine,
             double dxFine, double dyFine, double dzFine,
-            Vector3d forceTotal,
+            Box meshBox,
+            IReadOnlyList<Point3d> loadPoints,
+            IReadOnlyList<Vector3d> loadVectors,
+            double youngModulus,
+            IReadOnlyList<Point3d> supportPoints,
+            IReadOnlyList<Vector3d> supportDirs,
             double volumeFraction,
             int maxOuterIter,
             int maxPcgIter,
@@ -47,7 +52,10 @@ namespace GHGPUPlugin.Chromodoris.Topology
             int maxElements,
             int solveStride,
             bool useGpuMatVec = true,
-            bool recordHistory = false)
+            bool recordHistory = false,
+            double filterRadius = 1.5,
+            bool penaltyContinuation = false,
+            bool enforceConnectivity = true)
         {
             int nx = insideFine.GetLength(0);
             int ny = insideFine.GetLength(1);
@@ -57,7 +65,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             {
                 DensityPhys = new float[nx, ny, nz],
                 Message = "",
-                DensityHistory = recordHistory ? new List<double[]>() : null
+                DensityHistory = recordHistory ? new List<float[,,]>() : null
             };
 
             string gpuFallbackMsg = null;
@@ -156,6 +164,8 @@ namespace GHGPUPlugin.Chromodoris.Topology
                         fixedDof[id * 3 + 2] = true;
                     }
 
+            ApplyDirectionalSupports(meshBox, nxc, nyc, nzc, nodeUsed, nid, supportPoints, supportDirs, fixedDof);
+
             int nLoadNodes = 0;
             for (int i = 0; i <= nxc; i++)
                 for (int j = 0; j <= nyc; j++)
@@ -163,8 +173,20 @@ namespace GHGPUPlugin.Chromodoris.Topology
                         if (loadN[i, j, k]) nLoadNodes++;
 
             var f = new double[ndof];
-            if (nLoadNodes > 0)
+            bool usePointLoads = loadPoints != null && loadPoints.Count > 0;
+            if (usePointLoads)
             {
+                BuildForceVectorPointLoads(meshBox, nxc, nyc, nzc, nodeUsed, nid, loadPoints, loadVectors, f);
+            }
+            else
+            {
+                if (nLoadNodes == 0)
+                {
+                    res.Message = "No load voxels: paint LoadMask where the external load is applied.";
+                    return res;
+                }
+
+                Vector3d forceTotal = SumLoadVectors(loadVectors);
                 double fx = forceTotal.X / nLoadNodes;
                 double fy = forceTotal.Y / nLoadNodes;
                 double fz = forceTotal.Z / nLoadNodes;
@@ -179,11 +201,6 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             f[id * 3 + 1] += fy;
                             f[id * 3 + 2] += fz;
                         }
-            }
-            else
-            {
-                res.Message = "No load voxels: paint LoadMask where the external load is applied.";
-                return res;
             }
 
             int nFixedDof = 0;
@@ -245,6 +262,15 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             double volTarget = volumeFraction * nDesign;
 
+            var isSupportEl = new bool[nElem];
+            var isLoadEl = new bool[nElem];
+            for (int e = 0; e < nElem; e++)
+            {
+                int ci = ex[e], cj = ey[e], ck = ez[e];
+                isSupportEl[e] = support[ci, cj, ck] >= 0.5f;
+                isLoadEl[e] = load[ci, cj, ck] >= 0.5f;
+            }
+
             var keCache = new Dictionary<(int, int, int), double[,]>();
             double[][,] K0e = new double[nElem][,];
             for (int e = 0; e < nElem; e++)
@@ -260,6 +286,14 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 K0e[e] = K0;
             }
 
+            double ym = youngModulus > 0 ? youngModulus : 1.0;
+            foreach (double[,] kmat in keCache.Values)
+            {
+                for (int a = 0; a < 24; a++)
+                    for (int b = 0; b < 24; b++)
+                        kmat[a, b] *= ym;
+            }
+
             var x = new double[nElem];
             var xNew = new double[nElem];
             var dc = new double[nElem];
@@ -272,10 +306,8 @@ namespace GHGPUPlugin.Chromodoris.Topology
             var Ap = new double[ndof];
             var diag = new double[ndof];
 
-            for (int e = 0; e < nElem; e++)
-                x[e] = passive[e] ? 1.0 : volumeFraction;
-
             double eminClamped = Math.Max(1e-9, Math.Min(emin, 0.5));
+            InitPathBiasedDensity(x, nElem, ex, ey, ez, isLoadEl, isSupportEl, passive, volumeFraction, eminClamped);
 
             IntPtr gpuCtx = IntPtr.Zero;
             bool useGpu = false;
@@ -300,6 +332,9 @@ namespace GHGPUPlugin.Chromodoris.Topology
             float[] fGpu = null;
             float[] uGpu = null;
             float[] diagGpu = null;
+
+            var pRuntime = new double[1];
+            pRuntime[0] = simpP;
 
             if (useGpu)
             {
@@ -335,7 +370,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     try
                     {
                         for (int e = 0; e < nElem; e++)
-                            rhoFlat[e] = (float)StiffnessInterp(x[e], passive[e], eminClamped, simpP);
+                            rhoFlat[e] = (float)StiffnessInterp(x[e], passive[e], eminClamped, pRuntime[0]);
                         for (int i = 0; i < ndof; i++)
                             vFlat[i] = (float)vecIn[i];
 
@@ -356,12 +391,33 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     }
                 }
 
-                MatVec(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, vecIn, vecOut);
+                MatVec(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, pRuntime[0], vecIn, vecOut);
             };
+
+            var rhoCoarse = new float[nxc, nyc, nzc];
+            double lastPenaltyUsed = simpP;
+            double lastMoveUsed = moveLimit;
 
             for (int outer = 0; outer < maxOuterIter; outer++)
             {
-                BuildDiagonal(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag);
+                int outerIter = outer + 1;
+                double pUse = simpP;
+                if (penaltyContinuation)
+                {
+                    pUse = 1.0 + (3.0 - 1.0) * Math.Min(1.0, Math.Max(0.0, (outerIter - 15) / 25.0));
+                    if (pUse < 1.0) pUse = 1.0;
+                    if (pUse > 3.0) pUse = 3.0;
+                }
+
+                pRuntime[0] = pUse;
+                lastPenaltyUsed = pUse;
+
+                double moveIter = moveLimit;
+                if (penaltyContinuation)
+                    moveIter = outerIter < 20 ? 0.1 : 0.2;
+                lastMoveUsed = moveIter;
+
+                BuildDiagonal(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, pUse, diag);
 
                 if (outer == 0)
                     Array.Clear(u, 0, ndof);
@@ -375,7 +431,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     try
                     {
                         for (int e2 = 0; e2 < nElem; e2++)
-                            rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, simpP);
+                            rhoFlat[e2] = (float)StiffnessInterp(x[e2], passive[e2], eminClamped, pUse);
                         for (int i = 0; i < ndof; i++)
                         {
                             fGpu[i] = (float)f[i];
@@ -453,7 +509,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 }
 
                 if (!solvedGpuPcg)
-                    PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, simpP, diag, f, u, y, r, zvec, pvec, Ap, matVecFn, maxPcgIter, tolRel);
+                    PcgSolve(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, pUse, diag, f, u, y, r, zvec, pvec, Ap, matVecFn, maxPcgIter, tolRel);
 
                 double C = Dot(f, u);
 
@@ -465,22 +521,23 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     double ce = Hex8BrickKe.ElementEnergy(K0, ue);
                     if (!passive[e])
                     {
-                        double dxrho = simpP * Math.Pow(x[e], simpP - 1.0) * (1.0 - eminClamped);
+                        double dxrho = pUse * Math.Pow(x[e], pUse - 1.0) * (1.0 - eminClamped);
                         dc[e] = -dxrho * ce;
                     }
                     else dc[e] = 0;
                 }
 
+                if (filterRadius > 0)
+                    ApplySensitivityFilter(dc, x, ex, ey, ez, nElem, filterRadius);
+
                 res.Compliance = C;
                 res.IterationCompliance.Add(C);
+                FillDensityPhysFromDesign(nElem, ex, ey, ez, x, passive, eminClamped, pUse,
+                    rhoCoarse, nxc, nyc, nzc, S, nx, ny, nz, insideFine, res.DensityPhys);
                 if (recordHistory && res.DensityHistory != null)
-                {
-                    var rhoSnap = new double[nElem];
-                    Array.Copy(x, rhoSnap, nElem);
-                    res.DensityHistory.Add(rhoSnap);
-                }
+                    res.DensityHistory.Add((float[,,])res.DensityPhys.Clone());
 
-                OcUpdate(nElem, x, dc, passive, volTarget, moveLimit, 0.001, xNew);
+                OcUpdate(nElem, x, dc, passive, volTarget, moveIter, 0.001, xNew);
 
                 double change = 0;
                 for (int e = 0; e < nElem; e++)
@@ -489,42 +546,103 @@ namespace GHGPUPlugin.Chromodoris.Topology
                     x[e] = xNew[e];
                 }
 
+                if (enforceConnectivity && outer > 2)
+                    EnforceConnectivity(x, ex, ey, ez, nElem, isSupportEl, isLoadEl);
+
                 res.IterationsUsed = outer + 1;
                 if (change < 0.01 && outer > 5) break;
             }
 
-            var rhoCoarse = new float[nxc, nyc, nzc];
-            for (int i = 0; i < nxc; i++)
-                for (int j = 0; j < nyc; j++)
-                    for (int k = 0; k < nzc; k++)
-                        rhoCoarse[i, j, k] = 0f;
-
-            for (int e = 0; e < nElem; e++)
-            {
-                double rho = StiffnessInterp(x[e], passive[e], eminClamped, simpP);
-                rhoCoarse[ex[e], ey[e], ez[e]] = (float)rho;
-            }
-
-            if (S == 1)
-            {
-                for (int i = 0; i < nx; i++)
-                    for (int j = 0; j < ny; j++)
-                        for (int k = 0; k < nz; k++)
-                            res.DensityPhys[i, j, k] = rhoCoarse[i, j, k];
-            }
-            else
-            {
-                UpsampleTrilinear(rhoCoarse, nxc, nyc, nzc, nx, ny, nz, insideFine, res.DensityPhys);
-            }
+            FillDensityPhysFromDesign(nElem, ex, ey, ez, x, passive, eminClamped, lastPenaltyUsed,
+                rhoCoarse, nxc, nyc, nzc, S, nx, ny, nz, insideFine, res.DensityPhys);
 
             res.DiagMessage =
                 $"Iters={res.IterationsUsed} | Compliance={res.Compliance:G4} | " +
                 $"GPU_PCG={res.GpuPcgUsed} | FallbackCode={res.PcgFallbackCode} | " +
                 $"nElem={nElem} | nDof={ndof} | vf={volumeFraction:G3} | " +
-                $"simpP={simpP:G3} | move={moveLimit:G3} | emin={emin:G3}";
+                $"simpP={(penaltyContinuation ? "continuation→" : "")}{lastPenaltyUsed:G3} | move={lastMoveUsed:G3} | emin={emin:G3}";
 
             res.Message = gpuFallbackMsg ?? "OK";
             return res;
+        }
+
+        private static Point3d NodeWorldPoint(Box box, int I, int J, int K, int nxc, int nyc, int nzc)
+        {
+            double ux = nxc <= 0 ? 0 : I / (double)nxc;
+            double uy = nyc <= 0 ? 0 : J / (double)nyc;
+            double uz = nzc <= 0 ? 0 : K / (double)nzc;
+            return box.PointAt(ux, uy, uz);
+        }
+
+        private static int FindNearestNodeIndex(Box box, int nxc, int nyc, int nzc, bool[,,] nodeUsed, int[,,] nid, Point3d p)
+        {
+            double best = double.MaxValue;
+            int bestId = -1;
+            for (int I = 0; I <= nxc; I++)
+            {
+                for (int J = 0; J <= nyc; J++)
+                {
+                    for (int K = 0; K <= nzc; K++)
+                    {
+                        if (!nodeUsed[I, J, K]) continue;
+                        Point3d q = NodeWorldPoint(box, I, J, K, nxc, nyc, nzc);
+                        double d = p.DistanceTo(q);
+                        if (d < best)
+                        {
+                            best = d;
+                            bestId = nid[I, J, K];
+                        }
+                    }
+                }
+            }
+
+            return bestId;
+        }
+
+        private static Vector3d SumLoadVectors(IReadOnlyList<Vector3d> loadVectors)
+        {
+            var sum = Vector3d.Zero;
+            if (loadVectors == null) return sum;
+            for (int i = 0; i < loadVectors.Count; i++)
+                sum += loadVectors[i];
+            return sum;
+        }
+
+        private static void BuildForceVectorPointLoads(Box box, int nxc, int nyc, int nzc,
+            bool[,,] nodeUsed, int[,,] nid,
+            IReadOnlyList<Point3d> loadPoints, IReadOnlyList<Vector3d> loadVectors, double[] f)
+        {
+            int n = loadPoints.Count;
+            for (int i = 0; i < n; i++)
+            {
+                int nodeId = FindNearestNodeIndex(box, nxc, nyc, nzc, nodeUsed, nid, loadPoints[i]);
+                if (nodeId < 0) continue;
+                Vector3d lv = loadVectors[i];
+                int b = nodeId * 3;
+                f[b + 0] += lv.X;
+                f[b + 1] += lv.Y;
+                f[b + 2] += lv.Z;
+            }
+        }
+
+        private static void ApplyDirectionalSupports(Box box, int nxc, int nyc, int nzc,
+            bool[,,] nodeUsed, int[,,] nid,
+            IReadOnlyList<Point3d> supportPoints, IReadOnlyList<Vector3d> supportDirs,
+            bool[] fixedDof)
+        {
+            if (supportPoints == null || supportDirs == null || supportPoints.Count == 0)
+                return;
+
+            for (int i = 0; i < supportPoints.Count; i++)
+            {
+                int nodeId = FindNearestNodeIndex(box, nxc, nyc, nzc, nodeUsed, nid, supportPoints[i]);
+                if (nodeId < 0) continue;
+                Vector3d d = supportDirs[i];
+                int b = nodeId * 3;
+                if (Math.Abs(d.X) > 0.5) fixedDof[b + 0] = true;
+                if (Math.Abs(d.Y) > 0.5) fixedDof[b + 1] = true;
+                if (Math.Abs(d.Z) > 0.5) fixedDof[b + 2] = true;
+            }
         }
 
         /// <summary>Fine cell counts along each axis for coarse cell (ic,jc,kc) with stride S.</summary>
@@ -584,6 +702,35 @@ namespace GHGPUPlugin.Chromodoris.Topology
                         loadC[ic, jc, kc] = l ? 1f : 0f;
                     }
                 }
+            }
+        }
+
+        private static void FillDensityPhysFromDesign(int nElem, int[] ex, int[] ey, int[] ez,
+            double[] x, bool[] passive, double eminClamped, double simpP,
+            float[,,] rhoCoarse, int nxc, int nyc, int nzc,
+            int S, int nx, int ny, int nz, float[,,] insideFine, float[,,] densityPhys)
+        {
+            for (int i = 0; i < nxc; i++)
+                for (int j = 0; j < nyc; j++)
+                    for (int k = 0; k < nzc; k++)
+                        rhoCoarse[i, j, k] = 0f;
+
+            for (int e = 0; e < nElem; e++)
+            {
+                double rho = StiffnessInterp(x[e], passive[e], eminClamped, simpP);
+                rhoCoarse[ex[e], ey[e], ez[e]] = (float)rho;
+            }
+
+            if (S == 1)
+            {
+                for (int i = 0; i < nx; i++)
+                    for (int j = 0; j < ny; j++)
+                        for (int k = 0; k < nz; k++)
+                            densityPhys[i, j, k] = rhoCoarse[i, j, k];
+            }
+            else
+            {
+                UpsampleTrilinear(rhoCoarse, nxc, nyc, nzc, nx, ny, nz, insideFine, densityPhys);
             }
         }
 
@@ -759,6 +906,298 @@ namespace GHGPUPlugin.Chromodoris.Topology
         private static double Norm(double[] a)
         {
             return Math.Sqrt(Dot(a, a));
+        }
+
+        /// <summary>
+        /// If support–load connectivity through elements with rho above 0.1 fails, boost density along a minimum-cost path (prefers existing material).
+        /// </summary>
+        private static void EnforceConnectivity(
+            double[] rho,
+            int[] ex, int[] ey, int[] ez,
+            int nElem,
+            bool[] isSupport,
+            bool[] isLoad,
+            double restoreRho = 0.5)
+        {
+            if (nElem == 0)
+                return;
+
+            var cellToElem = new Dictionary<(int, int, int), int>(nElem);
+            for (int e = 0; e < nElem; e++)
+                cellToElem[(ex[e], ey[e], ez[e])] = e;
+
+            var visited = new bool[nElem];
+            var q = new Queue<int>();
+            for (int e = 0; e < nElem; e++)
+            {
+                if (!isSupport[e]) continue;
+                visited[e] = true;
+                q.Enqueue(e);
+            }
+
+            while (q.Count > 0)
+            {
+                int u = q.Dequeue();
+                for (int di = -1; di <= 1; di++)
+                {
+                    for (int dj = -1; dj <= 1; dj++)
+                    {
+                        for (int dk = -1; dk <= 1; dk++)
+                        {
+                            if (di == 0 && dj == 0 && dk == 0) continue;
+                            if (!cellToElem.TryGetValue((ex[u] + di, ey[u] + dj, ez[u] + dk), out int v))
+                                continue;
+                            if (visited[v] || rho[v] <= 0.1)
+                                continue;
+                            visited[v] = true;
+                            q.Enqueue(v);
+                        }
+                    }
+                }
+            }
+
+            for (int e = 0; e < nElem; e++)
+            {
+                if (isLoad[e] && visited[e])
+                    return;
+            }
+
+            var dist = new double[nElem];
+            var parent = new int[nElem];
+            for (int i = 0; i < nElem; i++)
+            {
+                dist[i] = double.PositiveInfinity;
+                parent[i] = -1;
+            }
+
+            var pq = new PriorityQueue<int, double>();
+            for (int e = 0; e < nElem; e++)
+            {
+                if (!isSupport[e]) continue;
+                dist[e] = 0;
+                pq.Enqueue(e, 0);
+            }
+
+            while (pq.Count > 0)
+            {
+                pq.TryDequeue(out int u, out double du);
+                if (du > dist[u] + 1e-12)
+                    continue;
+
+                for (int di = -1; di <= 1; di++)
+                {
+                    for (int dj = -1; dj <= 1; dj++)
+                    {
+                        for (int dk = -1; dk <= 1; dk++)
+                        {
+                            if (di == 0 && dj == 0 && dk == 0) continue;
+                            if (!cellToElem.TryGetValue((ex[u] + di, ey[u] + dj, ez[u] + dk), out int v))
+                                continue;
+                            double w = 1.0 - rho[v];
+                            if (w < 0) w = 0;
+                            double nd = du + w;
+                            if (nd < dist[v])
+                            {
+                                dist[v] = nd;
+                                parent[v] = u;
+                                pq.Enqueue(v, nd);
+                            }
+                        }
+                    }
+                }
+            }
+
+            int bestL = -1;
+            double bestD = double.PositiveInfinity;
+            for (int e = 0; e < nElem; e++)
+            {
+                if (!isLoad[e] || double.IsInfinity(dist[e])) continue;
+                if (dist[e] < bestD)
+                {
+                    bestD = dist[e];
+                    bestL = e;
+                }
+            }
+
+            if (bestL < 0)
+                return;
+
+            int cur = bestL;
+            while (cur >= 0)
+            {
+                if (rho[cur] < restoreRho)
+                    rho[cur] = restoreRho;
+                if (isSupport[cur])
+                    break;
+                cur = parent[cur];
+            }
+        }
+
+        /// <summary>
+        /// 6-neighbor BFS distances on the coarse element graph; seeds with dist 0; unreachable → large finite.
+        /// </summary>
+        private static void GeodesicDistanceToMarkers(
+            int nElem, int[] ex, int[] ey, int[] ez,
+            Dictionary<(int, int, int), int> cellToElem,
+            bool[] isMarker,
+            double[] dist,
+            double unreachableReplace)
+        {
+            for (int i = 0; i < nElem; i++)
+                dist[i] = double.PositiveInfinity;
+
+            var q = new Queue<int>();
+            for (int e = 0; e < nElem; e++)
+            {
+                if (!isMarker[e]) continue;
+                dist[e] = 0;
+                q.Enqueue(e);
+            }
+
+            if (q.Count == 0)
+            {
+                for (int i = 0; i < nElem; i++)
+                    dist[i] = 0;
+                return;
+            }
+
+            while (q.Count > 0)
+            {
+                int u = q.Dequeue();
+                double du = dist[u];
+                int ci = ex[u], cj = ey[u], ck = ez[u];
+                void Relax(int ni, int nj, int nk)
+                {
+                    if (!cellToElem.TryGetValue((ni, nj, nk), out int v))
+                        return;
+                    double nd = du + 1.0;
+                    if (nd < dist[v])
+                    {
+                        dist[v] = nd;
+                        q.Enqueue(v);
+                    }
+                }
+
+                Relax(ci + 1, cj, ck);
+                Relax(ci - 1, cj, ck);
+                Relax(ci, cj + 1, ck);
+                Relax(ci, cj - 1, ck);
+                Relax(ci, cj, ck + 1);
+                Relax(ci, cj, ck - 1);
+            }
+
+            for (int i = 0; i < nElem; i++)
+            {
+                if (double.IsInfinity(dist[i]))
+                    dist[i] = unreachableReplace;
+            }
+        }
+
+        /// <summary>
+        /// Bias initial design density toward the load–support corridor: scale raw path bias so its mean over all coarse elements equals vf, then clamp design cells to [emin, 1]; passive load/support stay 1.
+        /// </summary>
+        private static void InitPathBiasedDensity(
+            double[] x,
+            int nElem,
+            int[] ex, int[] ey, int[] ez,
+            bool[] isLoadEl,
+            bool[] isSupportEl,
+            bool[] passive,
+            double volumeFraction,
+            double eminClamped)
+        {
+            if (nElem == 0)
+                return;
+
+            var cellToElem = new Dictionary<(int, int, int), int>(nElem);
+            for (int e = 0; e < nElem; e++)
+                cellToElem[(ex[e], ey[e], ez[e])] = e;
+
+            int mx = 0, my = 0, mz = 0;
+            for (int e = 0; e < nElem; e++)
+            {
+                mx = Math.Max(mx, ex[e]);
+                my = Math.Max(my, ey[e]);
+                mz = Math.Max(mz, ez[e]);
+            }
+            double unreachable = mx + my + mz + nElem + 10.0;
+
+            var dLoad = new double[nElem];
+            var dSup = new double[nElem];
+            GeodesicDistanceToMarkers(nElem, ex, ey, ez, cellToElem, isLoadEl, dLoad, unreachable);
+            GeodesicDistanceToMarkers(nElem, ex, ey, ez, cellToElem, isSupportEl, dSup, unreachable);
+
+            double sumBias = 0;
+            for (int e = 0; e < nElem; e++)
+                sumBias += 1.0 / (1.0 + dLoad[e] + dSup[e]);
+
+            double meanBias = sumBias / nElem;
+            double scale = volumeFraction / (meanBias + 1e-30);
+
+            for (int e = 0; e < nElem; e++)
+            {
+                if (passive[e])
+                {
+                    x[e] = 1.0;
+                    continue;
+                }
+
+                double pb = (1.0 / (1.0 + dLoad[e] + dSup[e])) * scale;
+                if (pb < eminClamped) pb = eminClamped;
+                if (pb > 1.0) pb = 1.0;
+                x[e] = pb;
+            }
+        }
+
+        /// <summary>
+        /// SIMP sensitivity filter: weighted spherical average in element grid space (reduces checkerboarding).
+        /// dc_filtered[i] = sum_j w_ij rho[j] dc[j] / sum_j w_ij rho[j], w_ij = max(0, radius - dist(i,j)).
+        /// </summary>
+        private static void ApplySensitivityFilter(
+            double[] dc,
+            double[] rho,
+            int[] ex, int[] ey, int[] ez,
+            int nElem,
+            double radius)
+        {
+            if (radius <= 0 || nElem == 0)
+                return;
+
+            var cellToElem = new Dictionary<(int, int, int), int>(nElem);
+            for (int i = 0; i < nElem; i++)
+                cellToElem[(ex[i], ey[i], ez[i])] = i;
+
+            int rCell = (int)Math.Ceiling(radius);
+            var dcFiltered = new double[nElem];
+
+            for (int i = 0; i < nElem; i++)
+            {
+                int ci = ex[i], cj = ey[i], ck = ez[i];
+                double num = 0;
+                double den = 0;
+                for (int ox = -rCell; ox <= rCell; ox++)
+                {
+                    for (int oy = -rCell; oy <= rCell; oy++)
+                    {
+                        for (int oz = -rCell; oz <= rCell; oz++)
+                        {
+                            double dist = Math.Sqrt(ox * ox + oy * oy + oz * oz);
+                            double w = radius - dist;
+                            if (w <= 0)
+                                continue;
+                            if (!cellToElem.TryGetValue((ci + ox, cj + oy, ck + oz), out int j))
+                                continue;
+                            double wr = w * rho[j];
+                            num += wr * dc[j];
+                            den += wr;
+                        }
+                    }
+                }
+
+                dcFiltered[i] = den > 0 ? num / den : 0.0;
+            }
+
+            Array.Copy(dcFiltered, dc, nElem);
         }
 
         private static void OcUpdate(int nElem, double[] x, double[] dc, bool[] passive, double volTarget,

@@ -37,18 +37,31 @@ namespace GHGPUPlugin.Chromodoris
             pManager.AddNumberParameter("VoidStiffness", "Emin", "Relative void stiffness Emin/E0 (e.g. 1e-6).", GH_ParamAccess.item, 1e-6);
             pManager.AddNumberParameter("Poisson", "Nu", "Poisson's ratio.", GH_ParamAccess.item, 0.3);
             pManager.AddIntegerParameter("MaxElements", "Max", "Abort if solid voxel count exceeds this (speed).", GH_ParamAccess.item, 40000);
-            pManager.AddNumberParameter("ForceX", "Fx", "Total force X component (model units).", GH_ParamAccess.item, 0.0);
-            pManager.AddNumberParameter("ForceY", "Fy", "Total force Y component.", GH_ParamAccess.item, 0.0);
-            pManager.AddNumberParameter("ForceZ", "Fz", "Total force Z component.", GH_ParamAccess.item, -1.0);
+            pManager.AddPointParameter("LoadPoints", "LP", "World-space force application points (parallel to LoadVectors).", GH_ParamAccess.list);
+            pManager.AddVectorParameter("LoadVectors", "LV", "Force vectors; with empty LP, summed and spread over LoadMask nodes.", GH_ParamAccess.list);
+            pManager.AddNumberParameter("YoungModulus", "E", "Material stiffness. 1=normalised; use 210000 for steel (MPa+mm).", GH_ParamAccess.item, 1.0);
+            pManager.AddPointParameter("SupportPoints", "SP", "Per-point directional supports (nearest mesh node); additive with SupportMask.", GH_ParamAccess.list);
+            pManager.AddVectorParameter("SupportDirs", "SD",
+                "Parallel to SupportPoints: abs(X,Y,Z) greater than 0.5 fixes that global DOF (e.g. 1,1,1 pin, 0,0,1 Z roller).",
+                GH_ParamAccess.list);
             pManager.AddIntegerParameter("SolveStride", "Str",
                 "Coarse solve: 1 = full grid; 2+ = merge S×S×S fine cells (faster, upsampled ρ for iso).",
                 GH_ParamAccess.item, 2);
             pManager.AddBooleanParameter("UseGPU", "GPU",
                 "Use Metal for PCG MatVec (stiffness × vector); CPU fallback if unavailable.", GH_ParamAccess.item, true);
             pManager.AddBooleanParameter("RecordHistory", "Rec",
-                "If true, append each outer iteration’s design ρ to DensityHistory (more memory).", GH_ParamAccess.item, false);
+                "If true, store upsampled float[x,y,z] density per outer iteration in DensityHistory (more memory).", GH_ParamAccess.item, false);
+            pManager.AddNumberParameter("FilterRadius", "Fr",
+                "Sensitivity filter radius in element units (0 = off, 1.5 recommended).", GH_ParamAccess.item, 1.5);
+            pManager.AddBooleanParameter("EnforceConnectivity", "Conn",
+                "After OC, bridge support–load if no rho-above-0.1 path (from iteration 4 onward).", GH_ParamAccess.item, true);
+            pManager[14].Optional = true;
+            pManager[15].Optional = true;
             pManager[16].Optional = true;
-            pManager[17].Optional = true;
+            pManager[18].Optional = true;
+            pManager[19].Optional = true;
+            pManager[20].Optional = true;
+            pManager[21].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -58,8 +71,8 @@ namespace GHGPUPlugin.Chromodoris
                 GH_ParamAccess.item);
             pManager.AddBoxParameter("BoundingBox", "B", "Passthrough for Build IsoSurface.", GH_ParamAccess.item);
             pManager.AddNumberParameter("Compliance", "C", "Last linear compliance f·u (relative units).", GH_ParamAccess.item);
-            pManager.AddNumberParameter("DensityHistory", "ρHist",
-                "SIMP design variable per element before each OC update; branch index = outer iteration when RecordHistory is true; empty otherwise.",
+            pManager.AddGenericParameter("DensityHistory", "ρHist",
+                "Upsampled density grid per outer iteration (same as R); branch = iteration; one wrapped float[,,] per branch when RecordHistory is true.",
                 GH_ParamAccess.tree);
             pManager.AddNumberParameter("IterationCompliance", "CIt",
                 "Compliance f·u after each outer iteration (convergence plot).", GH_ParamAccess.list);
@@ -74,7 +87,7 @@ namespace GHGPUPlugin.Chromodoris
                 DA.SetData(0, null);
                 DA.SetData(1, bbox);
                 DA.SetData(2, 0.0);
-                DA.SetDataTree(3, new GH_Structure<GH_Number>());
+                DA.SetDataTree(3, new GH_Structure<IGH_Goo>());
                 DA.SetDataList(4, new List<GH_Number>());
             }
 
@@ -84,8 +97,14 @@ namespace GHGPUPlugin.Chromodoris
             int outer = 30, pcg = 800, maxEl = 40000, solveStride = 2;
             bool useGpu = true;
             bool recordHistory = false;
+            double filterRadius = 1.5;
+            bool enforceConn = true;
             double simpP = 3, move = 0.2, emin = 1e-6, nu = 0.3;
-            double fx = 0, fy = 0, fz = -1;
+            var loadPts = new List<Point3d>();
+            var loadVecs = new List<Vector3d>();
+            double youngE = 1.0;
+            var supPts = new List<Point3d>();
+            var supDirs = new List<Vector3d>();
 
             if (!DA.GetData(0, ref box))
             {
@@ -139,12 +158,16 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(9, ref emin);
             DA.GetData(10, ref nu);
             maxEl = ReadIntCoerce(DA, 11, maxEl);
-            DA.GetData(12, ref fx);
-            DA.GetData(13, ref fy);
-            DA.GetData(14, ref fz);
-            solveStride = ReadIntCoerce(DA, 15, solveStride);
-            DA.GetData(16, ref useGpu);
-            DA.GetData(17, ref recordHistory);
+            DA.GetDataList(12, loadPts);
+            DA.GetDataList(13, loadVecs);
+            DA.GetData(14, ref youngE);
+            DA.GetDataList(15, supPts);
+            DA.GetDataList(16, supDirs);
+            solveStride = ReadIntCoerce(DA, 17, solveStride);
+            DA.GetData(18, ref useGpu);
+            DA.GetData(19, ref recordHistory);
+            DA.GetData(20, ref filterRadius);
+            DA.GetData(21, ref enforceConn);
 
             if (useGpu)
             {
@@ -195,24 +218,44 @@ namespace GHGPUPlugin.Chromodoris
                 return;
             }
 
-            double dx = box.X.Length / nx;
-            double dy = box.Y.Length / ny;
-            double dz = box.Z.Length / nz;
-
-            var force = new Vector3d(fx, fy, fz);
-            if (force.Length < 1e-20)
+            bool hasLp = loadPts.Count > 0;
+            if (hasLp && loadPts.Count != loadVecs.Count)
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Force vector is (near) zero.");
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "LoadPoints and LoadVectors must have the same count.");
                 FallbackOutputs(box);
                 return;
             }
+
+            if (supPts.Count > 0 && supPts.Count != supDirs.Count)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "SupportPoints and SupportDirs must have the same count.");
+                FallbackOutputs(box);
+                return;
+            }
+
+            var sumLv = Vector3d.Zero;
+            foreach (Vector3d v in loadVecs)
+                sumLv += v;
+            if (!hasLp && sumLv.Length < 1e-20)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "No loads defined.");
+                FallbackOutputs(box);
+                return;
+            }
+
+            double dx = box.X.Length / nx;
+            double dy = box.Y.Length / ny;
+            double dz = box.Z.Length / nz;
 
             VoxelSimpOptimizer.Result res;
             try
             {
                 res = VoxelSimpOptimizer.Run(
-                    inside, support, load, dx, dy, dz, force, vf,
-                    outer, pcg, simpP, move, emin, nu, maxEl, solveStride, useGpu, recordHistory);
+                    inside, support, load, dx, dy, dz,
+                    box, loadPts, loadVecs, youngE, supPts, supDirs,
+                    vf,
+                    outer, pcg, simpP, move, emin, nu, maxEl, solveStride, useGpu, recordHistory, filterRadius,
+                    penaltyContinuation: false, enforceConnectivity: enforceConn);
             }
             catch (Exception ex)
             {
@@ -247,16 +290,11 @@ namespace GHGPUPlugin.Chromodoris
             if (!string.IsNullOrWhiteSpace(res.GpuDiagPreSolve))
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, res.GpuDiagPreSolve);
 
-            var histTree = new GH_Structure<GH_Number>();
+            var histTree = new GH_Structure<IGH_Goo>();
             if (res.DensityHistory != null)
             {
-                for (int br = 0; br < res.DensityHistory.Count; br++)
-                {
-                    var path = new GH_Path(br);
-                    double[] row = res.DensityHistory[br];
-                    for (int e = 0; e < row.Length; e++)
-                        histTree.Append(new GH_Number(row[e]), path);
-                }
+                for (int i = 0; i < res.DensityHistory.Count; i++)
+                    histTree.Append(new GH_ObjectWrapper(res.DensityHistory[i]), new GH_Path(i));
             }
 
             var cIt = new List<GH_Number>(res.IterationCompliance.Count);
