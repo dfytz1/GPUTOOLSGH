@@ -212,6 +212,11 @@ namespace GHGPUPlugin.Chromodoris
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, res.Message);
                 // Continue: solve succeeded via CPU fallback.
             }
+            else if (!string.IsNullOrEmpty(res.Message) && res.Message.StartsWith("GPU_REMARK:", StringComparison.Ordinal))
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, res.Message);
+                // Continue: solve succeeded via CPU fallback.
+            }
             else if (res.Message != "OK")
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, res.Message);

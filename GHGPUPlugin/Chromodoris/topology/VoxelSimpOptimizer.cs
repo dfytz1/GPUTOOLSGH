@@ -411,6 +411,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
                         if (pcgCode == 0)
                         {
+                            // Validate: GPU sometimes returns success with a degenerate/zero solution; reject and fall back to CPU.
                             double complianceCheck = 0;
                             for (int i = 0; i < ndof; i++)
                                 complianceCheck += uGpu[i] * fGpu[i];
@@ -424,8 +425,9 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             }
                             else
                             {
+                                // Remark-only: solve continues via CPU fallback.
                                 if (outer == 0 && gpuFallbackMsg == null)
-                                    gpuFallbackMsg = "GPU_FALLBACK: FemPcgSolve returned zero displacement (bad solve), using CPU";
+                                    gpuFallbackMsg = "GPU_REMARK: FemPcgSolve returned degenerate displacement; using CPU";
                             }
                         }
                         else if (outer == 0 && gpuFallbackMsg == null)
