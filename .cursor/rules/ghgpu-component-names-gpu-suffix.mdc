@@ -1,0 +1,14 @@
+---
+description: New GHGPUPlugin Grasshopper components must end their display name with GPU
+alwaysApply: true
+---
+
+# GHGPUPlugin component naming
+
+When **adding or renaming** `GH_Component` classes in this repo (`GHGPUPlugin/Components/**`):
+
+- The Grasshopper **display name** (first argument to `GH_Component`’s base constructor) **must end with ` GPU`** (space before GPU), e.g. `Shortest Route Mesh GPU`, `Laplacian Smooth GPU`.
+- Keep names readable; put the domain first (`… Mesh GPU`, `… Curve GPU`, `… 2D GPU`), then the **` GPU`** suffix.
+- **Nicknames** should stay short and unique (they need not literally end in `GPU`, but may include it, e.g. `RouteMeshGPU`).
+
+This is a project branding convention for the **GPUTools** tab, even if a particular component is CPU-only for some code paths.

@@ -2,41 +2,43 @@ using Rhino.Geometry;
 
 namespace GHGPUPlugin.Algorithms;
 
-/// <summary>Shortest path along a curve network (Dijkstra). Each curve is one undirected edge Start→End weighted by arc length.</summary>
+/// <summary>Graph built from curves (one undirected edge per curve between merged endpoints).</summary>
+public sealed class CurveGraph
+{
+    public List<Point3d> Vertices { get; }
+    public List<(int A, int B)> EdgePairs { get; }
+    public List<Curve> EdgeCurves { get; }
+    public List<double> EdgeLengths { get; }
+    internal List<(int V, double W)>[] Adj { get; }
+
+    internal CurveGraph(
+        List<Point3d> vertices,
+        List<(int A, int B)> edgePairs,
+        List<Curve> edgeCurves,
+        List<double> edgeLengths,
+        List<(int V, double W)>[] adj)
+    {
+        Vertices = vertices;
+        EdgePairs = edgePairs;
+        EdgeCurves = edgeCurves;
+        EdgeLengths = edgeLengths;
+        Adj = adj;
+    }
+}
+
+/// <summary>Shortest path on a <see cref="CurveGraph"/> (Dijkstra).</summary>
 public static class CurveNetworkShortestPath
 {
-    public static bool TryFindPath(
-        IEnumerable<Curve> curves,
-        Point3d startPt,
-        Point3d endPt,
-        double mergeTolerance,
-        double snapTolerance,
-        out List<Point3d> path,
-        out double length,
-        out string? error)
+    public static CurveGraph BuildGraph(IEnumerable<Curve> curves, double mergeTolerance, bool useChordLength)
     {
-        path = new List<Point3d>();
-        length = 0;
-        error = null;
+        var edgePairs = new List<(int A, int B)>();
+        var edgeCurves = new List<Curve>();
+        var edgeLengths = new List<double>();
 
         if (mergeTolerance <= 0)
-        {
-            error = "Merge tolerance must be positive.";
-            return false;
-        }
+            return new CurveGraph(new List<Point3d>(), edgePairs, edgeCurves, edgeLengths, Array.Empty<List<(int V, double W)>>());
 
-        if (snapTolerance <= 0)
-        {
-            error = "Snap tolerance must be positive.";
-            return false;
-        }
-
-        var verts = new List<Point3d>();
-        var grid = new Dictionary<(long X, long Y, long Z), List<int>>();
-        double cell = mergeTolerance;
-        double mergeSq = mergeTolerance * mergeTolerance;
-
-        var edges = new List<(int A, int B, double W)>();
+        var grid = new GridIndex(mergeTolerance);
 
         foreach (Curve c in curves)
         {
@@ -45,25 +47,61 @@ public static class CurveNetworkShortestPath
 
             Point3d pa = c.PointAtStart;
             Point3d pb = c.PointAtEnd;
-            int a = AddOrGetVertex(verts, grid, cell, mergeSq, pa);
-            int b = AddOrGetVertex(verts, grid, cell, mergeSq, pb);
+            int a = grid.AddOrGet(pa);
+            int b = grid.AddOrGet(pb);
             if (a == b)
                 continue;
 
-            double w = c.GetLength();
-            edges.Add((a, b, w));
-            edges.Add((b, a, w));
+            double w = useChordLength ? pa.DistanceTo(pb) : c.GetLength();
+            edgePairs.Add((a, b));
+            edgeCurves.Add(c);
+            edgeLengths.Add(w);
         }
 
-        if (verts.Count == 0)
+        List<Point3d> verts = grid.Vertices;
+        int n = verts.Count;
+        var adj = new List<(int V, double W)>[n];
+        for (int i = 0; i < n; i++)
+            adj[i] = new List<(int V, double W)>();
+
+        for (int i = 0; i < edgePairs.Count; i++)
         {
-            error = "No usable curves (need at least one valid curve with distinct merged endpoints).";
+            (int a, int b) = edgePairs[i];
+            double w = edgeLengths[i];
+            adj[a].Add((b, w));
+            adj[b].Add((a, w));
+        }
+
+        return new CurveGraph(verts, edgePairs, edgeCurves, edgeLengths, adj);
+    }
+
+    public static bool TryFindPath(
+        CurveGraph g,
+        Point3d startPt,
+        Point3d endPt,
+        double snapTolerance,
+        out List<int> pathIndices,
+        out double length,
+        out string? error)
+    {
+        pathIndices = new List<int>();
+        length = 0;
+        error = null;
+
+        if (snapTolerance <= 0)
+        {
+            error = "Snap tolerance must be positive.";
             return false;
         }
 
-        int snapRadiusCells = (int)Math.Ceiling(snapTolerance / mergeTolerance);
-        int startV = NearestVertexWithinGrid(verts, grid, cell, startPt, snapTolerance, snapRadiusCells, out _);
-        int endV = NearestVertexWithinGrid(verts, grid, cell, endPt, snapTolerance, snapRadiusCells, out _);
+        if (g.Vertices.Count == 0)
+        {
+            error = "Graph has no vertices.";
+            return false;
+        }
+
+        int startV = NearestVertexLinear(g.Vertices, startPt, snapTolerance, out _);
+        int endV = NearestVertexLinear(g.Vertices, endPt, snapTolerance, out _);
         if (startV < 0)
         {
             error = "Start point is too far from the curve network (increase Snap tolerance or move the point).";
@@ -78,18 +116,12 @@ public static class CurveNetworkShortestPath
 
         if (startV == endV)
         {
-            path.Add(verts[startV]);
+            pathIndices.Add(startV);
             length = 0;
             return true;
         }
 
-        int n = verts.Count;
-        var adj = new List<(int v, float w)>[n];
-        for (int i = 0; i < n; i++)
-            adj[i] = new List<(int, float)>();
-        foreach (var (a, b, w) in edges)
-            adj[a].Add((b, (float)w));
-
+        int n = g.Vertices.Count;
         var dist = new double[n];
         var prev = new int[n];
         for (int i = 0; i < n; i++)
@@ -109,7 +141,7 @@ public static class CurveNetworkShortestPath
             if (u == endV)
                 break;
 
-            foreach (var (v, w) in adj[u])
+            foreach (var (v, w) in g.Adj[u])
             {
                 double nd = du + w;
                 if (nd < dist[v])
@@ -142,96 +174,155 @@ public static class CurveNetworkShortestPath
         }
 
         order.Reverse();
-        path = new List<Point3d>(order.Count);
-        foreach (int vi in order)
-            path.Add(verts[vi]);
+        pathIndices = order;
         return true;
     }
 
-    private static (long X, long Y, long Z) CellOf(Point3d p, double cell)
+    /// <summary>Single-source Dijkstra to all nodes; runs until the priority queue is empty.</summary>
+    public static bool TrySingleSourceAll(
+        CurveGraph g,
+        Point3d sourcePt,
+        double snapTolerance,
+        out int sourceIndex,
+        out double[] distances,
+        out int[] prev,
+        out string? error)
     {
-        return (
-            (long)Math.Floor(p.X / cell),
-            (long)Math.Floor(p.Y / cell),
-            (long)Math.Floor(p.Z / cell));
-    }
+        sourceIndex = -1;
+        distances = Array.Empty<double>();
+        prev = Array.Empty<int>();
+        error = null;
 
-    /// <summary>Merges with an existing vertex within merge tolerance using a 3×3×3 cell neighborhood.</summary>
-    private static int AddOrGetVertex(
-        List<Point3d> verts,
-        Dictionary<(long X, long Y, long Z), List<int>> grid,
-        double cell,
-        double mergeSq,
-        Point3d p)
-    {
-        (long cx, long cy, long cz) = CellOf(p, cell);
-
-        for (long dx = -1; dx <= 1; dx++)
-        for (long dy = -1; dy <= 1; dy++)
-        for (long dz = -1; dz <= 1; dz++)
+        if (snapTolerance <= 0)
         {
-            var key = (cx + dx, cy + dy, cz + dz);
-            if (!grid.TryGetValue(key, out List<int>? bucket))
-                continue;
-            for (int i = 0; i < bucket.Count; i++)
-            {
-                int vi = bucket[i];
-                if (verts[vi].DistanceToSquared(p) <= mergeSq)
-                    return vi;
-            }
+            error = "Snap tolerance must be positive.";
+            return false;
         }
 
-        int idx = verts.Count;
-        verts.Add(p);
-        var home = (cx, cy, cz);
-        if (!grid.TryGetValue(home, out List<int>? list))
+        if (g.Vertices.Count == 0)
         {
-            list = new List<int>();
-            grid[home] = list;
+            error = "Graph has no vertices.";
+            return false;
         }
 
-        list.Add(idx);
-        return idx;
-    }
-
-    /// <summary>Nearest vertex within <paramref name="maxDist"/> by scanning grid cells in a cube of half-size <paramref name="radiusCells"/> (in cell units).</summary>
-    private static int NearestVertexWithinGrid(
-        List<Point3d> verts,
-        Dictionary<(long X, long Y, long Z), List<int>> grid,
-        double cell,
-        Point3d p,
-        double maxDist,
-        int radiusCells,
-        out double bestD)
-    {
-        int best = -1;
-        bestD = double.MaxValue;
-        double maxSq = maxDist * maxDist;
-        (long cx, long cy, long cz) = CellOf(p, cell);
-
-        long r = radiusCells;
-        for (long dx = -r; dx <= r; dx++)
-        for (long dy = -r; dy <= r; dy++)
-        for (long dz = -r; dz <= r; dz++)
+        int startV = NearestVertexLinear(g.Vertices, sourcePt, snapTolerance, out _);
+        if (startV < 0)
         {
-            var key = (cx + dx, cy + dy, cz + dz);
-            if (!grid.TryGetValue(key, out List<int>? bucket))
+            error = "Source point is too far from the curve network (increase Snap tolerance or move the point).";
+            return false;
+        }
+
+        sourceIndex = startV;
+        int n = g.Vertices.Count;
+        var dist = new double[n];
+        var p = new int[n];
+        for (int i = 0; i < n; i++)
+        {
+            dist[i] = double.PositiveInfinity;
+            p[i] = -1;
+        }
+
+        dist[startV] = 0;
+        var pq = new PriorityQueue<int, double>();
+        pq.Enqueue(startV, 0);
+
+        while (pq.TryDequeue(out int u, out double du))
+        {
+            if (du > dist[u])
                 continue;
-            for (int i = 0; i < bucket.Count; i++)
+
+            foreach (var (v, w) in g.Adj[u])
             {
-                int vi = bucket[i];
-                double d2 = verts[vi].DistanceToSquared(p);
-                if (d2 > maxSq)
-                    continue;
-                double d = Math.Sqrt(d2);
-                if (best < 0 || d < bestD)
+                double nd = du + w;
+                if (nd < dist[v])
                 {
-                    bestD = d;
-                    best = vi;
+                    dist[v] = nd;
+                    p[v] = u;
+                    pq.Enqueue(v, nd);
                 }
             }
         }
 
+        distances = dist;
+        prev = p;
+        return true;
+    }
+
+    private static int NearestVertexLinear(List<Point3d> verts, Point3d p, double maxDist, out double bestD)
+    {
+        int best = -1;
+        bestD = double.MaxValue;
+        double maxSq = maxDist * maxDist;
+        for (int i = 0; i < verts.Count; i++)
+        {
+            double d2 = verts[i].DistanceToSquared(p);
+            if (d2 > maxSq)
+                continue;
+            double d = Math.Sqrt(d2);
+            if (best < 0 || d < bestD)
+            {
+                bestD = d;
+                best = i;
+            }
+        }
+
         return best;
+    }
+
+    /// <summary>Spatial hash for merging endpoints during graph build only.</summary>
+    internal sealed class GridIndex
+    {
+        private readonly List<Point3d> _vertices = new();
+        private readonly Dictionary<(long X, long Y, long Z), List<int>> _cells = new();
+        private readonly double _cell;
+        private readonly double _mergeSq;
+
+        public GridIndex(double mergeTolerance)
+        {
+            _cell = mergeTolerance;
+            _mergeSq = mergeTolerance * mergeTolerance;
+        }
+
+        public List<Point3d> Vertices => _vertices;
+
+        public int AddOrGet(Point3d p)
+        {
+            (long cx, long cy, long cz) = CellOf(p, _cell);
+
+            for (long dx = -1; dx <= 1; dx++)
+            for (long dy = -1; dy <= 1; dy++)
+            for (long dz = -1; dz <= 1; dz++)
+            {
+                var key = (cx + dx, cy + dy, cz + dz);
+                if (!_cells.TryGetValue(key, out List<int>? bucket))
+                    continue;
+                for (int i = 0; i < bucket.Count; i++)
+                {
+                    int vi = bucket[i];
+                    if (_vertices[vi].DistanceToSquared(p) <= _mergeSq)
+                        return vi;
+                }
+            }
+
+            int idx = _vertices.Count;
+            _vertices.Add(p);
+            var home = (cx, cy, cz);
+            if (!_cells.TryGetValue(home, out List<int>? list))
+            {
+                list = new List<int>();
+                _cells[home] = list;
+            }
+
+            list.Add(idx);
+            return idx;
+        }
+
+        private static (long X, long Y, long Z) CellOf(Point3d p, double cell)
+        {
+            return (
+                (long)Math.Floor(p.X / cell),
+                (long)Math.Floor(p.Y / cell),
+                (long)Math.Floor(p.Z / cell));
+        }
     }
 }

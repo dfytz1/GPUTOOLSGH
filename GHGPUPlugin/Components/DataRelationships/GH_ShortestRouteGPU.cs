@@ -12,8 +12,8 @@ public class GH_ShortestRouteGPU : GH_Component
 {
     public GH_ShortestRouteGPU()
         : base(
-            "Shortest Route GPU",
-            "RouteGPU",
+            "Shortest Route Mesh GPU",
+            "RouteMeshGPU",
             "Shortest path on mesh topology (Euclidean edge weights). Start/end points are snapped to the nearest mesh corner (topology vertex) via closest face. Dijkstra on CPU; optional Metal to build weighted edge list.",
             "GPUTools",
             "Curve")

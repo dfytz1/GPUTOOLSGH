@@ -1,0 +1,33 @@
+---
+description: After GHGPUPlugin builds, deploy gha/dylib/metallib to Rhino Grasshopper Libraries
+alwaysApply: true
+---
+
+# Grasshopper Libraries deploy (MetalGH / GHGPUPlugin)
+
+Whenever you finish a successful **`dotnet build`** of **GHGPUPlugin** (any configuration), ensure Rhino 8 Grasshopper has the latest plugin and native pieces.
+
+## What to copy
+
+From the build output directory (e.g. `GHGPUPlugin/bin/Release/net7.0/` or `.../Debug/net7.0/` matching the build you ran):
+
+- `GHGPUPlugin.gha`
+- `MetalBridge.dylib` (if present next to the `.gha`)
+- `default.metallib` (if present next to the `.gha`)
+
+## Destination (macOS, Rhino 8)
+
+`$HOME/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries`
+
+If that folder is missing (different Rhino install), report it instead of failing silently.
+
+## When to run deploy
+
+1. **After every `dotnet build`** of this project in agent sessions — the `.csproj` already runs **`DeployToGrasshopperLibraries`** on build; if you only edited files without building, run **`cd GHGPUPlugin && dotnet build -c Release`** (or the same config the user asked for) so deploy runs.
+2. **After rebuilding MetalBridge** — rebuild the plugin so `MetalBridge.dylib` / `default.metallib` are copied into the output folder, then build **GHGPUPlugin** again (or copy those two files from `MetalBridge/build/Release/` and `MetalBridge/Kernels/` into **Libraries** alongside the `.gha`).
+
+## Quick verify
+
+List the three files in **Libraries** and confirm timestamps match the build you just ran.
+
+Do **not** tell the user to copy manually if you can run the build or `cp` yourself in this environment.
