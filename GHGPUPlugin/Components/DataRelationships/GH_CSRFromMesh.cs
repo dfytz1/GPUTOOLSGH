@@ -12,7 +12,7 @@ public class GH_CSRFromMesh : GH_Component
         : base(
             "CSR From Mesh GPU",
             "MeshCSRGPU",
-            "Topology-vertex adjacency in CSR form (column indices flat + row offsets). Build is CPU-only; UseGPU is reserved for future GPU paths.",
+            "Topology-vertex adjacency in CSR form (column indices flat + row offsets). Extraction runs on the CPU.",
             "GPUTools",
             "DataRelationships")
     {
@@ -21,7 +21,6 @@ public class GH_CSRFromMesh : GH_Component
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
         pManager.AddMeshParameter("InputMesh", "InputMesh", "Triangle or quad mesh (topology edges define adjacency).", GH_ParamAccess.item);
-        pManager.AddBooleanParameter("UseGPU", "UseGPU", "Reserved; CSR extraction is CPU-only.", GH_ParamAccess.item, true);
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -45,10 +44,6 @@ public class GH_CSRFromMesh : GH_Component
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Mesh is not valid.");
             return;
         }
-
-        bool useGpu = true;
-        DA.GetData("UseGPU", ref useGpu);
-        _ = useGpu;
 
         int[][] neighbors = MeshTopologyNeighbors.NeighborsFromEdges(mesh);
         MeshTopologyNeighbors.ToCsr(neighbors, out int[] adjFlat, out int[] rowOffsets);
