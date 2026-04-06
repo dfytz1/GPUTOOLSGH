@@ -52,39 +52,33 @@ public static class ApproximateHeatGeodesic
         for (int i = 0; i < nTopo; i++)
             x[i] = y[i] = z[i] = heatTopo[i];
 
-        bool ranGpu = false;
-        if (useGpu && NativeLoader.IsMetalAvailable && MetalSharedContext.TryGetContext(out IntPtr ctx))
+        // One Laplacian iteration per submit so seed vertices can be pinned to 1f on the CPU between steps.
+        // (A batched GPU kernel with in-kernel pinning would avoid P/Invoke overhead — see Metal bridge notes.)
+        IntPtr heatCtx = IntPtr.Zero;
+        bool heatGpu = useGpu && NativeLoader.IsMetalAvailable && MetalSharedContext.TryGetContext(out heatCtx);
+        var heatOpts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
+        double heatStrengthD = HeatStrength;
+        for (int it = 0; it < HeatIterations; it++)
         {
-            int code = MetalBridge.RunLaplacianIterations(
-                ctx,
-                x,
-                y,
-                z,
-                adjFlat,
-                rowOffsets,
-                nTopo,
-                HeatStrength,
-                HeatIterations);
-            if (code == 0)
-                ranGpu = true;
-        }
-
-        if (!ranGpu)
-        {
-            var opts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
-            double strengthD = HeatStrength;
-            for (int it = 0; it < HeatIterations; it++)
+            bool iterGpu = false;
+            if (heatGpu)
             {
-                UmbrellaScalar3(x, y, z, neighbors, strengthD, opts);
-                for (int si = 0; si < nTopo; si++)
-                {
-                    if (seedTopo[si])
-                        x[si] = y[si] = z[si] = 1f;
-                }
+                int code = MetalBridge.RunLaplacianIterations(
+                    heatCtx,
+                    x,
+                    y,
+                    z,
+                    adjFlat,
+                    rowOffsets,
+                    nTopo,
+                    HeatStrength,
+                    1);
+                iterGpu = code == 0;
             }
-        }
-        else
-        {
+
+            if (!iterGpu)
+                UmbrellaScalar3(x, y, z, neighbors, heatStrengthD, heatOpts);
+
             for (int si = 0; si < nTopo; si++)
             {
                 if (seedTopo[si])
@@ -117,41 +111,35 @@ public static class ApproximateHeatGeodesic
         if (iterations < 1)
             iterations = 1;
 
-        IntPtr ctx2 = IntPtr.Zero;
-        bool distGpu = useGpu && NativeLoader.IsMetalAvailable && MetalSharedContext.TryGetContext(out ctx2);
-        if (distGpu)
+        IntPtr distCtx = IntPtr.Zero;
+        bool distGpu = useGpu && NativeLoader.IsMetalAvailable && MetalSharedContext.TryGetContext(out distCtx);
+        var distOpts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
+        for (int it = 0; it < iterations; it++)
         {
-            int code = MetalBridge.RunLaplacianIterations(
-                ctx2,
-                x,
-                y,
-                z,
-                adjFlat,
-                rowOffsets,
-                nTopo,
-                strF,
-                iterations);
-            distGpu = code == 0;
-        }
-
-        if (!distGpu)
-        {
-            var opts = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
-            for (int it = 0; it < iterations; it++)
+            bool iterGpu = false;
+            if (distGpu)
             {
-                UmbrellaScalar3(x, y, z, neighbors, strength, opts);
-                for (int si = 0; si < nTopo; si++)
-                {
-                    if (seedTopo[si])
-                        x[si] = y[si] = z[si] = 0f;
-                }
+                int code = MetalBridge.RunLaplacianIterations(
+                    distCtx,
+                    x,
+                    y,
+                    z,
+                    adjFlat,
+                    rowOffsets,
+                    nTopo,
+                    strF,
+                    1);
+                iterGpu = code == 0;
             }
-        }
 
-        for (int si = 0; si < nTopo; si++)
-        {
-            if (seedTopo[si])
-                x[si] = y[si] = z[si] = 0f;
+            if (!iterGpu)
+                UmbrellaScalar3(x, y, z, neighbors, strength, distOpts);
+
+            for (int si = 0; si < nTopo; si++)
+            {
+                if (seedTopo[si])
+                    x[si] = y[si] = z[si] = 0f;
+            }
         }
 
         distancePerMeshVertex = new double[vc];
