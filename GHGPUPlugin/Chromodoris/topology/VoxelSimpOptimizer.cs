@@ -20,6 +20,9 @@ namespace GHGPUPlugin.Chromodoris.Topology
             public double Compliance;
             public int IterationsUsed;
             public string Message;
+            public bool GpuPcgUsed;        // true if FemPcgSolve returned 0 at least once
+            public int PcgFallbackCode;    // last non-zero pcgCode, 0 if never failed
+            public string DiagMessage;     // detailed diagnostic string
         }
 
         public static Result Run(
@@ -381,11 +384,15 @@ namespace GHGPUPlugin.Chromodoris.Topology
                             for (int i = 0; i < ndof; i++)
                                 u[i] = uGpu[i];
                             solvedGpuPcg = true;
+                            res.GpuPcgUsed = true;
                         }
                         else if (outer == 0 && gpuFallbackMsg == null)
                         {
                             gpuFallbackMsg = $"GPU_FALLBACK: FemPcgSolve returned {pcgCode}";
                         }
+
+                        if (pcgCode != 0)
+                            res.PcgFallbackCode = pcgCode;
                     }
                     catch
                     {
@@ -451,6 +458,12 @@ namespace GHGPUPlugin.Chromodoris.Topology
             {
                 UpsampleTrilinear(rhoCoarse, nxc, nyc, nzc, nx, ny, nz, insideFine, res.DensityPhys);
             }
+
+            res.DiagMessage =
+                $"Iters={res.IterationsUsed} | Compliance={res.Compliance:G4} | " +
+                $"GPU_PCG={res.GpuPcgUsed} | FallbackCode={res.PcgFallbackCode} | " +
+                $"nElem={nElem} | nDof={ndof} | vf={volumeFraction:G3} | " +
+                $"simpP={simpP:G3} | move={moveLimit:G3} | emin={emin:G3}";
 
             res.Message = gpuFallbackMsg ?? "OK";
             return res;

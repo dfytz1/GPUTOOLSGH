@@ -199,6 +199,9 @@ namespace GHGPUPlugin.Chromodoris
             AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
                 "Fast path: elastic SIMP on coarse stride, ρ upsampled to mask res — not sign-off FEA. No density filter.");
 
+            if (!string.IsNullOrWhiteSpace(res.DiagMessage))
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, res.DiagMessage);
+
             DA.SetData(0, new GH_ObjectWrapper(res.DensityPhys));
             DA.SetData(1, box);
             DA.SetData(2, res.Compliance);
