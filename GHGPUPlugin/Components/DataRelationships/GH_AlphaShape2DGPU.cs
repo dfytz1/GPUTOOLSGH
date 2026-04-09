@@ -8,14 +8,14 @@ using Rhino.Geometry;
 
 namespace GHGPUPlugin.Components.DataRelationships;
 
-/// <summary>2D alpha shape: Delaunay via <see cref="AnisoCvtDelaunay2D"/>, then drop triangles whose circumradius exceeds a threshold (Metal parallel filter, CPU fallback).</summary>
+/// <summary>2D alpha shape: Delaunay via GPU JFA edges + Triangle.NET constraints when enabled, else Bowyer–Watson; then circumradius filter on Metal (CPU fallback).</summary>
 public class GH_AlphaShape2DGPU : GH_Component
 {
     public GH_AlphaShape2DGPU()
         : base(
             "Alpha Shape 2D GPU",
             "AlphaShGPU",
-            "Builds a planar Delaunay triangulation (same Bowyer–Watson as Anisotropic CVT remesh) of projected points, then keeps triangles whose circumcircle radius is at most Alpha radius. Smaller Alpha radius removes more triangles; non-positive Alpha keeps the full Delaunay mesh. Triangle filtering runs on Metal when available.",
+            "Projects points to a plane. Optional JFA+Triangle.NET: GPU Jump-Flooding Delaunay edges seed constrained triangulation (Unofficial.Triangle.NET); on failure or if disabled, Bowyer–Watson (same as Anisotropic CVT remesh). Then keeps triangles whose circumcircle radius is at most Alpha radius. Non-positive Alpha keeps all Delaunay triangles. Circumradius filter uses Metal when available.",
             "GPUTools",
             "Graph")
     {
@@ -25,8 +25,10 @@ public class GH_AlphaShape2DGPU : GH_Component
     {
         pm.AddPointParameter("Points", "P", "Point cloud (projected to the plane).", GH_ParamAccess.list);
         pm.AddPlaneParameter("Plane", "Pl", "Plane for projection and mesh orientation.", GH_ParamAccess.item, Plane.WorldXY);
-        pm.AddNumberParameter("AlphaRadius", "A", "Maximum circumcircle radius to keep a triangle (model units). ≤0 keeps all Delaunay triangles.", GH_ParamAccess.item, 10.0);
-        pm.AddBooleanParameter("UseGPU", "GPU", "Use Metal for triangle filtering when available.", GH_ParamAccess.item, true);
+        pm.AddNumberParameter("AlphaRadius", "A", "Maximum circumcircle radius to keep a triangle (model units). Zero or negative keeps all Delaunay triangles.", GH_ParamAccess.item, 10.0);
+        pm.AddBooleanParameter("JFASeed", "Hybrid", "True: JFA plus Triangle.NET Delaunay when Metal is on. False: Bowyer-Watson only.", GH_ParamAccess.item, true);
+        pm.AddIntegerParameter("JFAGrid", "Res", "JFA grid resolution (next power of two). Only when Hybrid is true and Metal is on.", GH_ParamAccess.item, 512);
+        pm.AddBooleanParameter("UseGPU", "Metal", "Use Apple Metal for JFA (if Hybrid) and for alpha circumradius filtering. CPU fallbacks if off or unavailable.", GH_ParamAccess.item, true);
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pm)
@@ -40,20 +42,26 @@ public class GH_AlphaShape2DGPU : GH_Component
         NativeLoader.EnsureLoaded();
 
         var points = new List<Point3d>();
-        if (!DA.GetDataList("Points", points) || points.Count < 3)
+        if (!DA.GetDataList(0, points) || points.Count < 3)
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Need at least three points.");
             return;
         }
 
         var plane = Plane.WorldXY;
-        DA.GetData("Plane", ref plane);
+        DA.GetData(1, ref plane);
 
         double alphaR = 10.0;
-        DA.GetData("AlphaRadius", ref alphaR);
+        DA.GetData(2, ref alphaR);
+
+        bool jfaSeed = true;
+        DA.GetData(3, ref jfaSeed);
+
+        int jfaGrid = 512;
+        DA.GetData(4, ref jfaGrid);
 
         bool useGpu = true;
-        DA.GetData("UseGPU", ref useGpu);
+        DA.GetData(5, ref useGpu);
 
         var uv = new Vector2d[points.Count];
         var px = new float[points.Count];
@@ -66,7 +74,40 @@ public class GH_AlphaShape2DGPU : GH_Component
             py[i] = (float)v;
         }
 
-        List<int> tri = AnisoCvtDelaunay2D.BowyerWatson(uv);
+        string delaunayPath;
+        List<int> tri;
+        IntPtr ctxJfa = IntPtr.Zero;
+        bool metalForJfa = useGpu && MetalGuard.EnsureReady(this) && MetalSharedContext.TryGetContext(out ctxJfa);
+
+        if (jfaSeed && metalForJfa)
+        {
+            if (JfaSeededTriangleNetDelaunay2D.TryTriangulate(uv, ctxJfa, jfaGrid, out List<int>? triJfa, out string jfaDetail))
+            {
+                tri = triJfa!;
+                delaunayPath = $"JFA+Triangle.NET ({jfaDetail})";
+            }
+            else
+            {
+                AddRuntimeMessage(
+                    GH_RuntimeMessageLevel.Warning,
+                    $"JFA+Triangle.NET failed ({jfaDetail}); using Bowyer–Watson.");
+                tri = AnisoCvtDelaunay2D.BowyerWatson(uv);
+                delaunayPath = "Bowyer–Watson";
+            }
+        }
+        else
+        {
+            if (jfaSeed && useGpu && !metalForJfa)
+            {
+                AddRuntimeMessage(
+                    GH_RuntimeMessageLevel.Warning,
+                    "Metal unavailable for JFA seed; using Bowyer–Watson.");
+            }
+
+            tri = AnisoCvtDelaunay2D.BowyerWatson(uv);
+            delaunayPath = "Bowyer–Watson";
+        }
+
         int nTri = tri.Count / 3;
         if (nTri < 1)
         {
@@ -76,18 +117,18 @@ public class GH_AlphaShape2DGPU : GH_Component
 
         var keep = new byte[nTri];
         bool unfiltered = alphaR <= 0.0 || double.IsInfinity(alphaR) || double.IsNaN(alphaR);
-        string path = string.Empty;
+        string filterPath = string.Empty;
 
         if (unfiltered)
         {
             Array.Fill(keep, (byte)1);
-            path = "full Delaunay (alpha not positive)";
+            filterPath = "full Delaunay (alpha not positive)";
         }
         else
         {
             float alphaF = (float)alphaR;
             bool ranGpu = false;
-            path = "CPU triangle filter";
+            filterPath = "CPU triangle filter";
             if (useGpu && MetalGuard.EnsureReady(this) && MetalSharedContext.TryGetContext(out IntPtr ctx))
             {
                 int[] triIdx = tri.ToArray();
@@ -95,7 +136,7 @@ public class GH_AlphaShape2DGPU : GH_Component
                 if (code == 0)
                 {
                     ranGpu = true;
-                    path = "Metal triangle filter";
+                    filterPath = "Metal triangle filter";
                 }
                 else
                 {
@@ -145,10 +186,10 @@ public class GH_AlphaShape2DGPU : GH_Component
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "No triangles passed the alpha test; try a larger Alpha radius.");
 
         DA.SetData(0, mesh);
-        DA.SetData(1, $"{points.Count} pts, {nTri} Delaunay tris → {kept} kept | {path}");
+        DA.SetData(1, $"{points.Count} pts, {nTri} Delaunay tris | {delaunayPath} → {kept} kept | {filterPath}");
     }
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("a7e3f1c2-9b84-4d6e-8f0a-1c2d3e4f5a6b");
+    public override Guid ComponentGuid => new("a7e3f1c2-9b84-4d6e-8f0a-1c2d3e4f5a6c");
 }

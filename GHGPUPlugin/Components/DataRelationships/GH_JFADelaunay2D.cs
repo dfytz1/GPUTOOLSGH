@@ -1,7 +1,8 @@
 using System.Drawing;
+using GHGPUPlugin.Algorithms;
+using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
-using GHGPUPlugin.NativeInterop;
 using Rhino.Geometry;
 
 namespace GHGPUPlugin.Components.DataRelationships;
@@ -51,39 +52,17 @@ public class GH_JFADelaunay2D : GH_Component
         int gridRes = 512;
         DA.GetData("GridResolution", ref gridRes);
 
-        var projected = new double[points.Count * 2];
-        double minU = double.MaxValue, maxU = double.MinValue;
-        double minV = double.MaxValue, maxV = double.MinValue;
+        var uv2 = new Vector2d[points.Count];
         for (int i = 0; i < points.Count; i++)
         {
             plane.ClosestParameter(points[i], out double u, out double v);
-            projected[i * 2] = u;
-            projected[i * 2 + 1] = v;
-            if (u < minU)
-                minU = u;
-            if (u > maxU)
-                maxU = u;
-            if (v < minV)
-                minV = v;
-            if (v > maxV)
-                maxV = v;
+            uv2[i] = new Vector2d(u, v);
         }
 
-        double rangeU = maxU - minU;
-        double rangeV = maxV - minV;
-        double range = Math.Max(rangeU, rangeV);
-        if (range < 1e-10)
+        if (!JfaDelaunay2DPlanar.TryJfaNormalizedCoords(uv2, out float[] uv, out float[] vv))
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "All points are coincident or collinear in the plane.");
             return;
-        }
-
-        var uv = new float[points.Count];
-        var vv = new float[points.Count];
-        for (int i = 0; i < points.Count; i++)
-        {
-            uv[i] = (float)(0.05 + 0.9 * (projected[i * 2] - minU) / range);
-            vv[i] = (float)(0.05 + 0.9 * (projected[i * 2 + 1] - minV) / range);
         }
 
         int maxEdges = points.Count * 12;
