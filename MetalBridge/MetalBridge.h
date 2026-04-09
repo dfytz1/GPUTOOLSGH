@@ -180,6 +180,34 @@ int mb_mesh_mesh_triangle_hits(
     int* outTriB,
     int* outTotalHits);
 
+/// Batched mesh–mesh tests: one GPU thread per (meshA, meshB) index pair. @p meshTriStartA length @c nMeshA+1 (prefix sums of triangle counts); same for B.
+int mb_mesh_batch_triangle_hits(
+    void* ctx,
+    float* ax,
+    float* ay,
+    float* az,
+    int* triA,
+    int* meshTriStartA,
+    int nMeshA,
+    int nVertA,
+    int nTriA,
+    float* bx,
+    float* by,
+    float* bz,
+    int* triB,
+    int* meshTriStartB,
+    int nMeshB,
+    int nVertB,
+    int nTriB,
+    int samePackedList,
+    int skipIntraMeshPair,
+    int maxHits,
+    int* outMeshA,
+    int* outMeshB,
+    int* outTriA,
+    int* outTriB,
+    int* outTotalHits);
+
 /// JFA-based 2D Delaunay (Voronoi dual): @p px, @p py normalised to [0,1]. @p outEdgeA/B length @p maxEdges.
 int mb_jfa_delaunay_2d(
     void* ctx,

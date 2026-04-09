@@ -10,20 +10,21 @@ using GHGPUPlugin.Utilities;
 namespace GHGPUPlugin.Components.DataRelationships;
 
 /// <summary>
-/// Triangle–triangle intersection between two meshes (or self) on Metal, with CPU fallback.
-/// The Metal kernel applies a per-pair AABB test before SAT (no mesh-level BVH yet).
+/// Batched triangle–triangle tests: one Metal thread per (mesh index A, mesh index B), all meshes packed into
+/// two SoA buffers. Empty MeshesB reuses the A pack (same list) for A×A tests including per-mesh self (upper-triangle pairs).
 /// </summary>
 public class GH_MeshCollisionGPU : GH_Component
 {
-    private const long MaxPairTests = 50_000_000L;
+    private const long MaxTrianglePairTests = 50_000_000L;
 
     private readonly struct TriD
     {
         internal readonly double X0, Y0, Z0, X1, Y1, Z1, X2, Y2, Z2;
 
-        internal TriD(float[] px, float[] py, float[] pz, int[] tri, int ti)
+        /// <param name="globalTriIndex">Triangle index in the concatenated triangle buffer (not mesh-local).</param>
+        internal TriD(float[] px, float[] py, float[] pz, int[] tri, int globalTriIndex)
         {
-            int o = ti * 3;
+            int o = globalTriIndex * 3;
             int i0 = tri[o];
             int i1 = tri[o + 1];
             int i2 = tri[o + 2];
@@ -43,9 +44,10 @@ public class GH_MeshCollisionGPU : GH_Component
         : base(
             "Mesh Collision GPU",
             "MeshHitGPU",
-            "Test triangle–triangle intersection between two triangle meshes (or one mesh against itself). "
-                + "GPU tests use an axis-aligned bounding box per triangle pair before SAT. "
-                + "Reports whether any pair intersects and records up to MaxHits intersecting face index pairs.",
+            "Test many meshes in one solve: provide lists MeshesA and MeshesB (or leave B empty to use A×A). "
+                + "One GPU thread runs all triangle tests for a single (mesh A index, mesh B index) pair, so one dispatch covers the whole batch. "
+                + "When B is empty and the same packed list is used, diagonal pairs (i,i) run self intersection (unique triangle pairs only). "
+                + "Optional skip skips those diagonal mesh pairs entirely.",
             "GPUTools",
             "Mesh")
     {
@@ -53,126 +55,124 @@ public class GH_MeshCollisionGPU : GH_Component
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
-        pManager.AddMeshParameter("MeshA", "A", "First triangle mesh (quads are triangulated once).", GH_ParamAccess.item);
-        pManager.AddMeshParameter("MeshB", "B", "Second mesh; leave empty for self-collision on MeshA.", GH_ParamAccess.item);
-        pManager.AddIntegerParameter("MaxHits", "M", "Maximum intersecting triangle pairs to record in outputs.", GH_ParamAccess.item, 4096);
-        pManager.AddBooleanParameter("SkipSameTriangleIndex", "Skip", "For A×B mode, skip pairs with the same triangle index (e.g. duplicated mesh).", GH_ParamAccess.item, true);
+        pManager.AddMeshParameter("MeshesA", "A", "Meshes in set A (list).", GH_ParamAccess.list);
+        pManager.AddMeshParameter("MeshesB", "B", "Meshes in set B (list). Leave empty to test A against A (same pack).", GH_ParamAccess.list);
+        pManager.AddIntegerParameter("MaxHits", "MaxHits", "Maximum intersecting triangle hits to record (each hit includes mesh indices).", GH_ParamAccess.item, 4096);
+        pManager.AddBooleanParameter("SkipIntraMeshPair", "SkipDiag", "When B is empty (A×A), skip mesh pairs with the same index (no mesh self-test).", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("UseGPU", "GPU", "Use Metal when available.", GH_ParamAccess.item, true);
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
     {
         pManager.AddBooleanParameter("Colliding", "C", "True if at least one triangle pair intersects.", GH_ParamAccess.item);
-        pManager.AddIntegerParameter("HitCount", "N", "Total intersecting pairs found (can exceed MaxHits).", GH_ParamAccess.item);
-        pManager.AddIntegerParameter("TriangleIndexA", "iA", "Triangle index on mesh A for each recorded hit.", GH_ParamAccess.list);
-        pManager.AddIntegerParameter("TriangleIndexB", "iB", "Triangle index on mesh B (or A in self mode) for each recorded hit.", GH_ParamAccess.list);
+        pManager.AddIntegerParameter("HitCount", "N", "Total hits (can exceed MaxHits).", GH_ParamAccess.item);
+        pManager.AddIntegerParameter("MeshIndexA", "mA", "Index into MeshesA for each recorded hit.", GH_ParamAccess.list);
+        pManager.AddIntegerParameter("MeshIndexB", "mB", "Index into MeshesB (or MeshesA if B was empty) for each recorded hit.", GH_ParamAccess.list);
+        pManager.AddIntegerParameter("TriangleIndexA", "iA", "Triangle index local to that mesh A entry.", GH_ParamAccess.list);
+        pManager.AddIntegerParameter("TriangleIndexB", "iB", "Triangle index local to that mesh B entry.", GH_ParamAccess.list);
     }
 
     protected override void SolveInstance(IGH_DataAccess DA)
     {
         NativeLoader.EnsureLoaded();
 
-        Mesh? meshA = null;
-        if (!DA.GetData(0, ref meshA) || meshA == null)
-        {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "MeshA is required.");
+        if (!TryCollectMeshes(DA, 0, "MeshesA", out List<Mesh> meshesA))
             return;
-        }
 
-        Mesh? meshB = null;
-        bool hasB = DA.GetData(1, ref meshB) && meshB != null;
+        var ghB = new List<GH_Mesh>();
+        DA.GetDataList(1, ghB);
+        List<Mesh>? meshesBResolved = null;
+        if (ghB.Count > 0)
+        {
+            meshesBResolved = new List<Mesh>();
+            foreach (GH_Mesh? g in ghB)
+            {
+                if (g?.Value != null && g.Value.IsValid)
+                    meshesBResolved.Add(g.Value);
+            }
+
+            if (meshesBResolved.Count == 0)
+                meshesBResolved = null;
+        }
 
         int maxHits = 4096;
         DA.GetData(2, ref maxHits);
         if (maxHits < 1)
             maxHits = 1;
 
-        bool skipSame = true;
-        DA.GetData(3, ref skipSame);
+        bool skipIntraMeshPair = false;
+        DA.GetData(3, ref skipIntraMeshPair);
 
         bool useGpu = true;
         DA.GetData(4, ref useGpu);
 
-        if (!MeshTriangleUtils.TryGetTriangleMeshForClosest(meshA, out Mesh workA))
+        bool samePacked = meshesBResolved == null;
+        List<Mesh> meshesBEffective = meshesBResolved ?? meshesA;
+
+        if (!TryPackMeshList(meshesA, out float[] ax, out float[] ay, out float[] az, out int[] triA, out int[] meshTriStartA, out int nVertA, out int nTriA, out int nMeshA))
         {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "MeshA could not be reduced to triangles.");
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Failed to pack MeshesA (need triangle meshes).");
             return;
         }
 
-        Mesh workB;
-        bool self;
-        if (!hasB)
+        if (!TryPackMeshList(meshesBEffective, out float[] bx, out float[] by, out float[] bz, out int[] triB, out int[] meshTriStartB, out int nVertB, out int nTriB, out int nMeshB))
         {
-            workB = workA;
-            self = true;
-        }
-        else
-        {
-            if (!MeshTriangleUtils.TryGetTriangleMeshForClosest(meshB!, out workB!))
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "MeshB could not be reduced to triangles.");
-                return;
-            }
-
-            self = false;
-        }
-
-        if (!TryBuildTriSoa(workA, out float[] ax, out float[] ay, out float[] az, out int[] triA, out int nVa, out int nTa))
-        {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "MeshA is not usable.");
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Failed to pack MeshesB (need triangle meshes).");
             return;
         }
 
-        if (!TryBuildTriSoa(workB, out float[] bx, out float[] by, out float[] bz, out int[] triB, out int nVb, out int nTb))
-        {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "MeshB is not usable.");
-            return;
-        }
-
-        long pairs = self ? (long)nTa * (nTa - 1) / 2 : (long)nTa * nTb;
-        if (pairs > MaxPairTests)
+        long triWork = CountTrianglePairTests(nMeshA, nMeshB, meshTriStartA, meshTriStartB, samePacked, skipIntraMeshPair);
+        if (triWork > MaxTrianglePairTests)
         {
             AddRuntimeMessage(
                 GH_RuntimeMessageLevel.Error,
-                $"Too many triangle pairs ({pairs}); limit is {MaxPairTests}. Simplify meshes or use a broad-phase externally.");
+                $"Too many triangle pair tests ({triWork}); limit is {MaxTrianglePairTests}. Reduce mesh counts or face counts.");
             return;
         }
 
-        int skipFlag = (!self && skipSame) ? 1 : 0;
-        int selfFlag = self ? 1 : 0;
+        int sameFlag = samePacked ? 1 : 0;
+        int skipFlag = skipIntraMeshPair ? 1 : 0;
 
-        var outIa = new int[maxHits];
-        var outIb = new int[maxHits];
+        var outMa = new int[maxHits];
+        var outMb = new int[maxHits];
+        var outTa = new int[maxHits];
+        var outTb = new int[maxHits];
         var totalBuf = new int[1];
 
         bool ranGpu = false;
         if (useGpu && NativeLoader.IsMetalAvailable && MetalSharedContext.TryGetContext(out IntPtr ctx))
         {
-            int code = MetalBridge.MeshMeshTriangleHits(
+            int code = MetalBridge.MeshBatchTriangleHits(
                 ctx,
                 ax,
                 ay,
                 az,
                 triA,
-                nVa,
-                nTa,
+                meshTriStartA,
+                nMeshA,
+                nVertA,
+                nTriA,
                 bx,
                 by,
                 bz,
                 triB,
-                nVb,
-                nTb,
-                selfFlag,
+                meshTriStartB,
+                nMeshB,
+                nVertB,
+                nTriB,
+                sameFlag,
                 skipFlag,
                 maxHits,
-                outIa,
-                outIb,
+                outMa,
+                outMb,
+                outTa,
+                outTb,
                 totalBuf);
             if (code != 0)
             {
                 AddRuntimeMessage(
                     GH_RuntimeMessageLevel.Error,
-                    $"Metal mesh collision failed with code {code}.");
+                    $"Metal batch mesh collision failed with code {code}.");
                 return;
             }
 
@@ -185,26 +185,30 @@ public class GH_MeshCollisionGPU : GH_Component
             {
                 AddRuntimeMessage(
                     GH_RuntimeMessageLevel.Warning,
-                    "GPU mesh collision did not run — using CPU (same tests).");
+                    "GPU batch collision did not run — using CPU (same tests).");
             }
 
             var hitWriteLock = new object();
-            RunCpuTriangleHits(
+            RunBatchCpu(
                 ax,
                 ay,
                 az,
                 triA,
-                nTa,
+                meshTriStartA,
+                nMeshA,
                 bx,
                 by,
                 bz,
                 triB,
-                nTb,
-                self,
-                skipFlag != 0,
+                meshTriStartB,
+                nMeshB,
+                samePacked,
+                skipIntraMeshPair,
                 maxHits,
-                outIa,
-                outIb,
+                outMa,
+                outMb,
+                outTa,
+                outTb,
                 totalBuf,
                 hitWriteLock);
         }
@@ -217,115 +221,308 @@ public class GH_MeshCollisionGPU : GH_Component
         {
             AddRuntimeMessage(
                 GH_RuntimeMessageLevel.Remark,
-                $"Recorded {maxHits} of {total} intersecting triangle pairs. Increase MaxHits to store more.");
+                $"Recorded {maxHits} of {total} hits. Increase MaxHits to store more.");
         }
 
-        var listA = new List<GH_Integer>(recorded);
-        var listB = new List<GH_Integer>(recorded);
+        var listMa = new List<GH_Integer>(recorded);
+        var listMb = new List<GH_Integer>(recorded);
+        var listTa = new List<GH_Integer>(recorded);
+        var listTb = new List<GH_Integer>(recorded);
         for (int i = 0; i < recorded; i++)
         {
-            listA.Add(new GH_Integer(outIa[i]));
-            listB.Add(new GH_Integer(outIb[i]));
+            listMa.Add(new GH_Integer(outMa[i]));
+            listMb.Add(new GH_Integer(outMb[i]));
+            listTa.Add(new GH_Integer(outTa[i]));
+            listTb.Add(new GH_Integer(outTb[i]));
         }
 
         DA.SetData(0, colliding);
         DA.SetData(1, total);
-        DA.SetDataList(2, listA);
-        DA.SetDataList(3, listB);
+        DA.SetDataList(2, listMa);
+        DA.SetDataList(3, listMb);
+        DA.SetDataList(4, listTa);
+        DA.SetDataList(5, listTb);
     }
 
-    private static bool TryBuildTriSoa(Mesh work, out float[] vx, out float[] vy, out float[] vz, out int[] triIdx, out int vCount, out int triCount)
+    private bool TryCollectMeshes(IGH_DataAccess DA, int index, string label, out List<Mesh> meshes)
     {
-        vx = vy = vz = Array.Empty<float>();
-        triIdx = Array.Empty<int>();
-        vCount = triCount = 0;
-        if (!work.IsValid || work.Vertices.Count == 0 || work.Faces.Count == 0)
-            return false;
-
-        vCount = work.Vertices.Count;
-        triCount = work.Faces.Count;
-        vx = new float[vCount];
-        vy = new float[vCount];
-        vz = new float[vCount];
-        for (int i = 0; i < vCount; i++)
+        meshes = new List<Mesh>();
+        var gh = new List<GH_Mesh>();
+        if (!DA.GetDataList(index, gh) || gh.Count == 0)
         {
-            Point3f p = work.Vertices[i];
-            vx[i] = p.X;
-            vy[i] = p.Y;
-            vz[i] = p.Z;
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, $"{label}: need at least one mesh.");
+            return false;
         }
 
-        triIdx = new int[triCount * 3];
-        for (int fi = 0; fi < triCount; fi++)
+        foreach (GH_Mesh? g in gh)
         {
-            MeshFace f = work.Faces[fi];
-            if (!f.IsTriangle)
-                return false;
-            triIdx[3 * fi] = f.A;
-            triIdx[3 * fi + 1] = f.B;
-            triIdx[3 * fi + 2] = f.C;
+            if (g?.Value != null && g.Value.IsValid)
+                meshes.Add(g.Value);
+        }
+
+        if (meshes.Count == 0)
+        {
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, $"{label}: no valid meshes.");
+            return false;
         }
 
         return true;
     }
 
-    private static void RunCpuTriangleHits(
+    private static bool TryPackMeshList(
+        IReadOnlyList<Mesh> meshes,
+        out float[] vx,
+        out float[] vy,
+        out float[] vz,
+        out int[] tri,
+        out int[] meshTriStart,
+        out int totalVerts,
+        out int totalTris,
+        out int nMesh)
+    {
+        vx = vy = vz = Array.Empty<float>();
+        tri = Array.Empty<int>();
+        meshTriStart = Array.Empty<int>();
+        totalVerts = totalTris = nMesh = 0;
+
+        nMesh = meshes.Count;
+        if (nMesh < 1)
+            return false;
+
+        meshTriStart = new int[nMesh + 1];
+        var vxL = new List<float>(256);
+        var vyL = new List<float>(256);
+        var vzL = new List<float>(256);
+        var triL = new List<int>(512);
+
+        int vOff = 0;
+        meshTriStart[0] = 0;
+        for (int mi = 0; mi < nMesh; mi++)
+        {
+            if (!MeshTriangleUtils.TryGetTriangleMeshForClosest(meshes[mi], out Mesh work))
+                return false;
+
+            if (!work.IsValid || work.Vertices.Count == 0 || work.Faces.Count == 0)
+                return false;
+
+            int vc = work.Vertices.Count;
+            int fc = work.Faces.Count;
+            for (int i = 0; i < vc; i++)
+            {
+                Point3f p = work.Vertices[i];
+                vxL.Add(p.X);
+                vyL.Add(p.Y);
+                vzL.Add(p.Z);
+            }
+
+            for (int fi = 0; fi < fc; fi++)
+            {
+                MeshFace f = work.Faces[fi];
+                if (!f.IsTriangle)
+                    return false;
+                triL.Add(f.A + vOff);
+                triL.Add(f.B + vOff);
+                triL.Add(f.C + vOff);
+            }
+
+            vOff += vc;
+            meshTriStart[mi + 1] = meshTriStart[mi] + fc;
+        }
+
+        vx = vxL.ToArray();
+        vy = vyL.ToArray();
+        vz = vzL.ToArray();
+        tri = triL.ToArray();
+        totalVerts = vOff;
+        totalTris = meshTriStart[nMesh];
+        return totalTris > 0 && meshTriStart[nMesh] * 3 == triL.Count;
+    }
+
+    private static long CountTrianglePairTests(
+        int nMeshA,
+        int nMeshB,
+        int[] startA,
+        int[] startB,
+        bool samePacked,
+        bool skipIntra)
+    {
+        long t = 0;
+        for (int ma = 0; ma < nMeshA; ma++)
+        {
+            int na = startA[ma + 1] - startA[ma];
+            for (int mb = 0; mb < nMeshB; mb++)
+            {
+                if (skipIntra && samePacked && ma == mb)
+                    continue;
+
+                int nb = startB[mb + 1] - startB[mb];
+                if (samePacked && ma == mb)
+                    t += (long)na * (na - 1) / 2;
+                else
+                    t += (long)na * nb;
+            }
+        }
+
+        return t;
+    }
+
+    private static void RunBatchCpu(
         float[] ax,
         float[] ay,
         float[] az,
         int[] triA,
-        int nTa,
+        int[] meshTriStartA,
+        int nMeshA,
         float[] bx,
         float[] by,
         float[] bz,
         int[] triB,
-        int nTb,
-        bool self,
-        bool skipSame,
+        int[] meshTriStartB,
+        int nMeshB,
+        bool samePacked,
+        bool skipIntraMeshPair,
         int maxHits,
-        int[] outIa,
-        int[] outIb,
+        int[] outMa,
+        int[] outMb,
+        int[] outTa,
+        int[] outTb,
         int[] totalBuf,
         object hitWriteLock)
     {
-        int np = self ? checked(nTa * (nTa - 1) / 2) : checked(nTa * nTb);
-        int totalHits = 0;
+        int nB = nMeshB;
+        var totalHitsBox = new int[1];
 
-        Parallel.For(0, np, gid =>
+        Parallel.For(0, nMeshA * nB, gid =>
         {
-            int ia;
-            int ib;
-            if (self)
-                DecodeTriPair(gid, nTa, out ia, out ib);
+            int ma = gid / nB;
+            int mb = gid % nB;
+
+            if (skipIntraMeshPair && samePacked && ma == mb)
+                return;
+
+            int t0a = meshTriStartA[ma];
+            int t1a = meshTriStartA[ma + 1];
+            int t0b = meshTriStartB[mb];
+            int t1b = meshTriStartB[mb + 1];
+            int na = t1a - t0a;
+            int nb = t1b - t0b;
+
+            bool intra = samePacked && ma == mb;
+
+            if (intra)
+            {
+                for (int ta = 0; ta < na; ta++)
+                {
+                    for (int tb = ta + 1; tb < na; tb++)
+                    {
+                        int gta = t0a + ta;
+                        int gtb = t0a + tb;
+                        TryRecordHit(
+                            ax,
+                            ay,
+                            az,
+                            triA,
+                            gta,
+                            ax,
+                            ay,
+                            az,
+                            triA,
+                            gtb,
+                            ma,
+                            mb,
+                            ta,
+                            tb,
+                            maxHits,
+                            totalHitsBox,
+                            outMa,
+                            outMb,
+                            outTa,
+                            outTb,
+                            hitWriteLock);
+                    }
+                }
+            }
             else
             {
-                ia = gid / nTb;
-                ib = gid % nTb;
-                if (skipSame && ia == ib)
-                    return;
-            }
-
-            var ta = new TriD(ax, ay, az, triA, ia);
-            var tb = new TriD(bx, by, bz, triB, ib);
-
-            if (!AabbOverlap(ta, tb))
-                return;
-
-            if (!TrianglesIntersectSat(ta, tb))
-                return;
-
-            int t = Interlocked.Increment(ref totalHits);
-            if (t <= maxHits)
-            {
-                lock (hitWriteLock)
+                for (int ta = 0; ta < na; ta++)
                 {
-                    outIa[t - 1] = ia;
-                    outIb[t - 1] = ib;
+                    for (int tb = 0; tb < nb; tb++)
+                    {
+                        int gta = t0a + ta;
+                        int gtb = t0b + tb;
+                        TryRecordHit(
+                            ax,
+                            ay,
+                            az,
+                            triA,
+                            gta,
+                            bx,
+                            by,
+                            bz,
+                            triB,
+                            gtb,
+                            ma,
+                            mb,
+                            ta,
+                            tb,
+                            maxHits,
+                            totalHitsBox,
+                            outMa,
+                            outMb,
+                            outTa,
+                            outTb,
+                            hitWriteLock);
+                    }
                 }
             }
         });
 
-        totalBuf[0] = totalHits;
+        totalBuf[0] = totalHitsBox[0];
+    }
+
+    private static void TryRecordHit(
+        float[] ax,
+        float[] ay,
+        float[] az,
+        int[] triA,
+        int gta,
+        float[] bx,
+        float[] by,
+        float[] bz,
+        int[] triB,
+        int gtb,
+        int ma,
+        int mb,
+        int localTa,
+        int localTb,
+        int maxHits,
+        int[] totalHitsBox,
+        int[] outMa,
+        int[] outMb,
+        int[] outTa,
+        int[] outTb,
+        object hitWriteLock)
+    {
+        var triDa = new TriD(ax, ay, az, triA, gta);
+        var triDb = new TriD(bx, by, bz, triB, gtb);
+
+        if (!AabbOverlap(triDa, triDb))
+            return;
+
+        if (!TrianglesIntersectSat(triDa, triDb))
+            return;
+
+        int t = Interlocked.Increment(ref totalHitsBox[0]);
+        if (t <= maxHits)
+        {
+            lock (hitWriteLock)
+            {
+                outMa[t - 1] = ma;
+                outMb[t - 1] = mb;
+                outTa[t - 1] = localTa;
+                outTb[t - 1] = localTb;
+            }
+        }
     }
 
     private static bool AabbOverlap(TriD a, TriD b)
@@ -356,12 +553,7 @@ public class GH_MeshCollisionGPU : GH_Component
 
     private static double DotP(double ax, double ay, double az, double px, double py, double pz) => ax * px + ay * py + az * pz;
 
-    private static bool SeparatedByAxis(
-        double ax,
-        double ay,
-        double az,
-        TriD a,
-        TriD b)
+    private static bool SeparatedByAxis(double ax, double ay, double az, TriD a, TriD b)
     {
         double al2 = ax * ax + ay * ay + az * az;
         if (al2 < 1e-60)
@@ -438,25 +630,6 @@ public class GH_MeshCollisionGPU : GH_Component
         }
 
         return true;
-    }
-
-    private static void DecodeTriPair(int k, int n, out int i, out int j)
-    {
-        int lo = 0;
-        int hi = n - 2;
-        while (lo < hi)
-        {
-            int mid = (lo + hi + 1) >> 1;
-            int baseMid = mid * (2 * n - mid - 1) / 2;
-            if (baseMid <= k)
-                lo = mid;
-            else
-                hi = mid - 1;
-        }
-
-        i = lo;
-        int baseI = i * (2 * n - i - 1) / 2;
-        j = i + 1 + (k - baseI);
     }
 
     protected override Bitmap Icon => ComponentIcons24.MeshCollision;

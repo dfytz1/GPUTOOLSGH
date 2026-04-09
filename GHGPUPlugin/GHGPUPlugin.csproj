@@ -23,8 +23,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\MetalBridge\build\Release\MetalBridge.dylib" Link="MetalBridge.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\build\Release\MetalBridge.dylib')" />
-    <None Include="..\MetalBridge\Kernels\default.metallib" Link="default.metallib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\Kernels\default.metallib')" />
+    <!-- Always copy so we never run a stale dylib after rebuilding MetalBridge (PreserveNewest can skip when timestamps mis-order). -->
+    <None Include="..\MetalBridge\build\Release\MetalBridge.dylib" Link="MetalBridge.dylib" CopyToOutputDirectory="Always" Condition="Exists('..\MetalBridge\build\Release\MetalBridge.dylib')" />
+    <None Include="..\MetalBridge\Kernels\default.metallib" Link="default.metallib" CopyToOutputDirectory="Always" Condition="Exists('..\MetalBridge\Kernels\default.metallib')" />
   </ItemGroup>
 
   <ItemGroup>
