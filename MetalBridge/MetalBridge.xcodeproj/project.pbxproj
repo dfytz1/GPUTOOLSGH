@@ -24,6 +24,7 @@
 		B20000000000000000000017 /* ProximityBlend.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = ProximityBlend.metal; sourceTree = "<group>"; };
 		B20000000000000000000019 /* GrayScott2D.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GrayScott2D.metal; sourceTree = "<group>"; };
 		B20000000000000000000020 /* AnisoCvtParticles.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnisoCvtParticles.metal; sourceTree = "<group>"; };
+		B20000000000000000000021 /* AlphaShape2D.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AlphaShape2D.metal; sourceTree = "<group>"; };
 		B30000000000000000000001 /* MetalBridge.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = MetalBridge.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -93,6 +94,7 @@
 				B20000000000000000000017 /* ProximityBlend.metal */,
 				B20000000000000000000019 /* GrayScott2D.metal */,
 				B20000000000000000000020 /* AnisoCvtParticles.metal */,
+				B20000000000000000000021 /* AlphaShape2D.metal */,
 			);
 			path = Shaders;
 			sourceTree = "<group>";

@@ -29,6 +29,7 @@ struct MBContext {
     id<MTLComputePipelineState> jfaInitPso = nil;
     id<MTLComputePipelineState> jfaStepPso = nil;
     id<MTLComputePipelineState> jfaEdgePso = nil;
+    id<MTLComputePipelineState> alphaShapeTri2DPso = nil;
     id<MTLComputePipelineState> laplaceJacobi3dPso = nil;
     id<MTLComputePipelineState> gradientMag3dPso = nil;
     id<MTLComputePipelineState> normalizeContrast3dPso = nil;
@@ -329,6 +330,7 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> jfaI = MakePso(device, library, @"jfaInitKernel", &err);
         id<MTLComputePipelineState> jfaS = MakePso(device, library, @"jfaStepKernel", &err);
         id<MTLComputePipelineState> jfaE = MakePso(device, library, @"jfaExtractEdgesKernel", &err);
+        id<MTLComputePipelineState> as2 = MakePso(device, library, @"alpha_shape_tri_keep_kernel", &err);
         id<MTLComputePipelineState> lj3 = MakePso(device, library, @"laplace_jacobi_3d", &err);
         id<MTLComputePipelineState> gm3 = MakePso(device, library, @"gradient_magnitude_3d", &err);
         id<MTLComputePipelineState> nc3 = MakePso(device, library, @"normalize_contrast_3d", &err);
@@ -356,7 +358,7 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> ac6 = MakePso(device, library, @"ac_copy_xyz_kernel", &err);
         id<MTLComputePipelineState> ac7 = MakePso(device, library, @"ac_project_boundary_segments_kernel", &err);
         if (bench == nil || lap == nil || cls == nil || cld == nil || pwu == nil || mmh == nil || mbh == nil || edg == nil || jfaI == nil || jfaS == nil || jfaE == nil
-            || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil || lapC == nil || fmv == nil || fmfp == nil || pcgAx == nil
+            || as2 == nil || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil || lapC == nil || fmv == nil || fmfp == nil || pcgAx == nil
             || pcgPc == nil || pcgDp == nil || pcgRl == nil || pcgRd == nil || pcgCp == nil || pcgU2f == nil || vsmp == nil
             || prxb == nil || gs2 == nil || am == nil || ac0 == nil || ac1 == nil || ac2 == nil || ac3 == nil || ac4 == nil
             || ac5 == nil || ac6 == nil || ac7 == nil)
@@ -380,6 +382,7 @@ int mb_create_context(void** outCtx)
         ctx->jfaInitPso = jfaI;
         ctx->jfaStepPso = jfaS;
         ctx->jfaEdgePso = jfaE;
+        ctx->alphaShapeTri2DPso = as2;
         ctx->laplaceJacobi3dPso = lj3;
         ctx->gradientMag3dPso = gm3;
         ctx->normalizeContrast3dPso = nc3;
@@ -427,6 +430,7 @@ void mb_destroy_context(void* ctx)
     mb->jfaInitPso = nil;
     mb->jfaStepPso = nil;
     mb->jfaEdgePso = nil;
+    mb->alphaShapeTri2DPso = nil;
     mb->laplaceJacobi3dPso = nil;
     mb->gradientMag3dPso = nil;
     mb->normalizeContrast3dPso = nil;
@@ -1434,6 +1438,74 @@ int mb_jfa_delaunay_2d(
         outEdgeB[i] = edgeSet[static_cast<size_t>(i)].second;
     }
     *outEdgeCount = count;
+    return 0;
+}
+
+int mb_alpha_shape_2d_tri_filter(
+    void* ctx,
+    const float* px,
+    const float* py,
+    int pointCount,
+    const int* triIdx,
+    int triangleCount,
+    float alphaRadiusMax,
+    unsigned char* keepOut)
+{
+    if (ctx == nullptr || pointCount < 3 || triangleCount < 1 || px == nullptr || py == nullptr || triIdx == nullptr || keepOut == nullptr)
+        return -80;
+    if (!(alphaRadiusMax > 0.f) || !std::isfinite(alphaRadiusMax))
+        return -81;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->alphaShapeTri2DPso == nil)
+        return -82;
+
+    const NSUInteger nPts = static_cast<NSUInteger>(pointCount);
+    const NSUInteger nTri = static_cast<NSUInteger>(triangleCount);
+    const NSUInteger pBytes = nPts * sizeof(float);
+    const NSUInteger tBytes = nTri * 3u * sizeof(int);
+    const NSUInteger kBytes = nTri * sizeof(unsigned char);
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+
+    id<MTLBuffer> bPx = [mb->device newBufferWithBytes:px length:pBytes options:opts];
+    id<MTLBuffer> bPy = [mb->device newBufferWithBytes:py length:pBytes options:opts];
+    id<MTLBuffer> bTri = [mb->device newBufferWithBytes:triIdx length:tBytes options:opts];
+    id<MTLBuffer> bKeep = [mb->device newBufferWithLength:kBytes options:opts];
+    if (bPx == nil || bPy == nil || bTri == nil || bKeep == nil)
+        return -83;
+
+    id<MTLBuffer> bNt = [mb->device newBufferWithBytes:&triangleCount length:sizeof(int) options:opts];
+    id<MTLBuffer> bPc = [mb->device newBufferWithBytes:&pointCount length:sizeof(int) options:opts];
+    id<MTLBuffer> bAlpha = [mb->device newBufferWithBytes:&alphaRadiusMax length:sizeof(float) options:opts];
+    if (bNt == nil || bPc == nil || bAlpha == nil)
+        return -84;
+
+    id<MTLComputePipelineState> pso = mb->alphaShapeTri2DPso;
+    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
+    const NSUInteger tpg = maxTpg > 0u ? MIN(maxTpg, 256UL) : 256UL;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -85;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -86;
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:bPx offset:0 atIndex:0];
+        [enc setBuffer:bPy offset:0 atIndex:1];
+        [enc setBuffer:bTri offset:0 atIndex:2];
+        [enc setBuffer:bKeep offset:0 atIndex:3];
+        [enc setBuffer:bNt offset:0 atIndex:4];
+        [enc setBuffer:bAlpha offset:0 atIndex:5];
+        [enc setBuffer:bPc offset:0 atIndex:6];
+        [enc dispatchThreads:MTLSizeMake(nTri, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    memcpy(keepOut, [bKeep contents], kBytes);
     return 0;
 }
 

@@ -230,6 +230,17 @@ public static class MetalBridge
         int maxEdges,
         int gridResolution);
 
+    [DllImport(LibName, EntryPoint = "mb_alpha_shape_2d_tri_filter", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int AlphaShape2DTriFilter(
+        IntPtr ctx,
+        [In] float[] px,
+        [In] float[] py,
+        int pointCount,
+        [In] int[] triIdx,
+        int triangleCount,
+        float alphaRadiusMax,
+        [Out] byte[] keepOut);
+
     [DllImport(LibName, EntryPoint = "mb_build_weighted_edges_csr", CallingConvention = CallingConvention.Cdecl)]
     public static extern int BuildWeightedEdgesCsr(
         IntPtr ctx,

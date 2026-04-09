@@ -7,7 +7,7 @@ using Rhino.Geometry;
 using GHGPUPlugin.NativeInterop;
 using GHGPUPlugin.Utilities;
 
-namespace GHGPUPlugin.Components.DataRelationships;
+namespace GHGPUPlugin.Components.DebugOnly;
 
 /// <summary>
 /// Batched triangle–triangle tests: one Metal thread per (mesh index A, mesh index B), all meshes packed into

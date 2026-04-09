@@ -220,6 +220,18 @@ int mb_jfa_delaunay_2d(
     int maxEdges,
     int gridResolution);
 
+/// Planar Delaunay triangles: @p triIdx length @c 3*triangleCount; @p keepOut length @c triangleCount (0/1).
+/// @p alphaRadiusMax must be finite and positive; triangles with circumradius larger than @p alphaRadiusMax get 0.
+int mb_alpha_shape_2d_tri_filter(
+    void* ctx,
+    const float* px,
+    const float* py,
+    int pointCount,
+    const int* triIdx,
+    int triangleCount,
+    float alphaRadiusMax,
+    unsigned char* keepOut);
+
 /// Fill directed edges with Euclidean 3D lengths; @p edgeCount must equal @p rowOffsets[vertexCount]. @p edgeWriteBase[v] is write offset (typically @p rowOffsets).
 int mb_build_weighted_edges_csr(
     void* ctx,
