@@ -8,7 +8,7 @@ using SpectralPacking.Core.Disassembly;
 using SpectralPacking.Core.Geometry;
 using SpectralPacking.Core.Voxelization;
 
-namespace SpectralPacking.GH.Components;
+namespace SpectralPacking.GH.Components.DebugOnly;
 
 public sealed class GH_DisassemblyCheck : GH_Component
 {

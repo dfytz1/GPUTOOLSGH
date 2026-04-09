@@ -9,6 +9,7 @@ namespace SpectralPacking.Core.Placement;
 public static class FftPlacementSearch
 {
     private const float CollisionEps = 1e-4f;
+    private const long MaxVoxelCells = 64_000_000L;
 
     /// <summary>Spectral placement (Algorithm 1): minimize ρ with ζ = 0 over orientations and lattice translations.</summary>
     public static SpectralPlacementCandidate? FindBestPlacement(
@@ -23,6 +24,12 @@ public static class FftPlacementSearch
         bool useParallel)
     {
         int nx = omega.Width, ny = omega.Height, nz = omega.Depth;
+        long totalVoxels = (long)nx * ny * nz;
+        if (totalVoxels > MaxVoxelCells)
+        {
+            throw new ArgumentException(
+                $"Voxel grid is too large ({totalVoxels:N0} cells; limit is {MaxVoxelCells:N0}). Increase VoxelSize to reduce the number of cells.");
+        }
 
         object gate = new();
         float bestLocal = float.PositiveInfinity;
@@ -103,7 +110,8 @@ public static class FftPlacementSearch
             if (bestOri >= float.PositiveInfinity / 2)
                 return;
 
-            var tw = ComputeTranslationWorld(meshR, trayWorld, voxelSize, btx, bty, btz);
+            int corrIdx = (int)((long)btx + (long)bty * ppx + (long)btz * ppx * ppy);
+            var tw = ComputeTranslationWorld(meshR, trayWorld, voxelSize, btx, bty, btz, z, corrIdx);
             var loc = (float[])localGrid.Data.Clone();
             var cand = new SpectralPlacementCandidate
             {
@@ -166,8 +174,14 @@ public static class FftPlacementSearch
         MeshTriangleSoup meshR,
         AxisAlignedBox trayWorld,
         double voxelSize,
-        int tx, int ty, int tz)
+        int tx, int ty, int tz,
+        float[]? collisionField = null,
+        int collisionFieldIndex = -1)
     {
+        if (collisionField != null &&
+            (collisionFieldIndex < 0 || collisionFieldIndex >= collisionField.Length))
+            return Vector3.Zero;
+
         if (meshR.VertexCount == 0)
             return Vector3.Zero;
 
@@ -196,9 +210,13 @@ public static class FftPlacementSearch
         for (int y = 0; y < ny; y++)
         for (int x = 0; x < nx; x++)
         {
-            int si = x + y * nx + z * nx * ny;
-            int di = x + y * px + z * px * py;
-            dst[di] = src[si];
+            long sil = (long)x + (long)y * nx + (long)z * nx * ny;
+            if (sil < 0 || sil >= src.Length)
+                continue;
+            long dil = (long)x + (long)y * px + (long)z * px * py;
+            if (dil < 0 || dil >= dst.Length)
+                continue;
+            dst[(int)dil] = src[(int)sil];
         }
     }
 }

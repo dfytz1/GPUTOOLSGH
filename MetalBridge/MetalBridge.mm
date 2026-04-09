@@ -22,6 +22,8 @@ struct MBContext {
     id<MTLComputePipelineState> laplacianPso = nil;
     id<MTLComputePipelineState> closestPso = nil;
     id<MTLComputePipelineState> closestCloudPso = nil;
+    id<MTLComputePipelineState> pairwiseUpperPso = nil;
+    id<MTLComputePipelineState> meshMeshTriHitPso = nil;
     id<MTLComputePipelineState> meshEdgesPso = nil;
     id<MTLComputePipelineState> jfaInitPso = nil;
     id<MTLComputePipelineState> jfaStepPso = nil;
@@ -319,6 +321,8 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> lap = MakePso(device, library, @"laplacianSmoothKernel", &err);
         id<MTLComputePipelineState> cls = MakePso(device, library, @"closestPointMeshKernel", &err);
         id<MTLComputePipelineState> cld = MakePso(device, library, @"closestPointCloudKernel", &err);
+        id<MTLComputePipelineState> pwu = MakePso(device, library, @"pairwiseUpperDistSqKernel", &err);
+        id<MTLComputePipelineState> mmh = MakePso(device, library, @"meshMeshTriangleHitsKernel", &err);
         id<MTLComputePipelineState> edg = MakePso(device, library, @"csrDirectedWeightedEdgesKernel", &err);
         id<MTLComputePipelineState> jfaI = MakePso(device, library, @"jfaInitKernel", &err);
         id<MTLComputePipelineState> jfaS = MakePso(device, library, @"jfaStepKernel", &err);
@@ -349,7 +353,7 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> ac5 = MakePso(device, library, @"ac_laplacian_constrained_deg_kernel", &err);
         id<MTLComputePipelineState> ac6 = MakePso(device, library, @"ac_copy_xyz_kernel", &err);
         id<MTLComputePipelineState> ac7 = MakePso(device, library, @"ac_project_boundary_segments_kernel", &err);
-        if (bench == nil || lap == nil || cls == nil || cld == nil || edg == nil || jfaI == nil || jfaS == nil || jfaE == nil
+        if (bench == nil || lap == nil || cls == nil || cld == nil || pwu == nil || mmh == nil || edg == nil || jfaI == nil || jfaS == nil || jfaE == nil
             || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil || lapC == nil || fmv == nil || fmfp == nil || pcgAx == nil
             || pcgPc == nil || pcgDp == nil || pcgRl == nil || pcgRd == nil || pcgCp == nil || pcgU2f == nil || vsmp == nil
             || prxb == nil || gs2 == nil || am == nil || ac0 == nil || ac1 == nil || ac2 == nil || ac3 == nil || ac4 == nil
@@ -367,6 +371,8 @@ int mb_create_context(void** outCtx)
         ctx->laplacianPso = lap;
         ctx->closestPso = cls;
         ctx->closestCloudPso = cld;
+        ctx->pairwiseUpperPso = pwu;
+        ctx->meshMeshTriHitPso = mmh;
         ctx->meshEdgesPso = edg;
         ctx->jfaInitPso = jfaI;
         ctx->jfaStepPso = jfaS;
@@ -411,6 +417,8 @@ void mb_destroy_context(void* ctx)
     mb->laplacianPso = nil;
     mb->closestPso = nil;
     mb->closestCloudPso = nil;
+    mb->pairwiseUpperPso = nil;
+    mb->meshMeshTriHitPso = nil;
     mb->meshEdgesPso = nil;
     mb->jfaInitPso = nil;
     mb->jfaStepPso = nil;
@@ -973,6 +981,188 @@ int mb_closest_points_cloud(
     memcpy(outCz, [mb->cpCloudOutZ contents], qbytes);
     memcpy(outDistSq, [mb->cpCloudOutD contents], qbytes);
     memcpy(outIndex, [mb->cpCloudOutI contents], qc * sizeof(int));
+    return 0;
+}
+
+int mb_pairwise_upper_dist_sq(void* ctx, float* x, float* y, float* z, int n, float* outDistSq)
+{
+    if (ctx == nullptr || n < 2 || x == nullptr || y == nullptr || z == nullptr || outDistSq == nullptr)
+        return -45;
+    const long long pll = static_cast<long long>(n) * (n - 1) / 2;
+    if (pll > INT_MAX)
+        return -46;
+    const int pairCount = static_cast<int>(pll);
+    if (pairCount <= 0)
+        return 0;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->pairwiseUpperPso == nil)
+        return -47;
+
+    const NSUInteger nBytes = static_cast<NSUInteger>(n) * sizeof(float);
+    const NSUInteger pBytes = static_cast<NSUInteger>(pairCount) * sizeof(float);
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+
+    id<MTLBuffer> bx = [mb->device newBufferWithLength:nBytes options:opts];
+    id<MTLBuffer> by = [mb->device newBufferWithLength:nBytes options:opts];
+    id<MTLBuffer> bz = [mb->device newBufferWithLength:nBytes options:opts];
+    id<MTLBuffer> bn = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    id<MTLBuffer> bout = [mb->device newBufferWithLength:pBytes options:opts];
+    if (bx == nil || by == nil || bz == nil || bn == nil || bout == nil)
+        return -48;
+
+    memcpy([bx contents], x, nBytes);
+    memcpy([by contents], y, nBytes);
+    memcpy([bz contents], z, nBytes);
+    memcpy([bn contents], &n, sizeof(int));
+
+    id<MTLComputePipelineState> pso = mb->pairwiseUpperPso;
+    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
+    const NSUInteger gridW = static_cast<NSUInteger>(pairCount);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -49;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -49;
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:bx offset:0 atIndex:0];
+        [enc setBuffer:by offset:0 atIndex:1];
+        [enc setBuffer:bz offset:0 atIndex:2];
+        [enc setBuffer:bn offset:0 atIndex:3];
+        [enc setBuffer:bout offset:0 atIndex:4];
+        [enc dispatchThreads:MTLSizeMake(gridW, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    memcpy(outDistSq, [bout contents], pBytes);
+    return 0;
+}
+
+int mb_mesh_mesh_triangle_hits(
+    void* ctx,
+    float* ax,
+    float* ay,
+    float* az,
+    int* triA,
+    int nVertA,
+    int nTriA,
+    float* bx,
+    float* by,
+    float* bz,
+    int* triB,
+    int nVertB,
+    int nTriB,
+    int selfCollision,
+    int skipSameTriangleIndex,
+    int maxHits,
+    int* outTriA,
+    int* outTriB,
+    int* outTotalHits)
+{
+    if (ctx == nullptr || outTotalHits == nullptr)
+        return -80;
+    if (nTriA <= 0 || nTriB <= 0 || nVertA <= 0 || nVertB <= 0 || ax == nullptr || ay == nullptr || az == nullptr || bx == nullptr
+        || by == nullptr || bz == nullptr || triA == nullptr || triB == nullptr)
+        return -80;
+    if (maxHits < 1 || outTriA == nullptr || outTriB == nullptr)
+        return -81;
+
+    const int64_t pairs = selfCollision != 0 ? (static_cast<int64_t>(nTriA) * (nTriA - 1)) / 2
+                                           : static_cast<int64_t>(nTriA) * static_cast<int64_t>(nTriB);
+    if (pairs <= 0)
+    {
+        *outTotalHits = 0;
+        return 0;
+    }
+    const int64_t kMaxPairs = 50000000LL;
+    if (pairs > kMaxPairs)
+        return -82;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->meshMeshTriHitPso == nil)
+        return -83;
+
+    const NSUInteger gridW = static_cast<NSUInteger>(pairs);
+    const NSUInteger vABytes = static_cast<NSUInteger>(nVertA) * sizeof(float);
+    const NSUInteger vBBytes = static_cast<NSUInteger>(nVertB) * sizeof(float);
+    const NSUInteger triABytes = static_cast<NSUInteger>(nTriA * 3) * sizeof(int);
+    const NSUInteger triBBytes = static_cast<NSUInteger>(nTriB * 3) * sizeof(int);
+    const NSUInteger outBytes = static_cast<NSUInteger>(maxHits) * sizeof(int);
+
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+
+    id<MTLBuffer> bax = [mb->device newBufferWithBytes:ax length:vABytes options:opts];
+    id<MTLBuffer> bay = [mb->device newBufferWithBytes:ay length:vABytes options:opts];
+    id<MTLBuffer> baz = [mb->device newBufferWithBytes:az length:vABytes options:opts];
+    id<MTLBuffer> btA = [mb->device newBufferWithBytes:triA length:triABytes options:opts];
+    id<MTLBuffer> bbx = [mb->device newBufferWithBytes:bx length:vBBytes options:opts];
+    id<MTLBuffer> bby = [mb->device newBufferWithBytes:by length:vBBytes options:opts];
+    id<MTLBuffer> bbz = [mb->device newBufferWithBytes:bz length:vBBytes options:opts];
+    id<MTLBuffer> btB = [mb->device newBufferWithBytes:triB length:triBBytes options:opts];
+
+    int z = 0;
+    id<MTLBuffer> bnVa = [mb->device newBufferWithBytes:&nVertA length:sizeof(int) options:opts];
+    id<MTLBuffer> bnTa = [mb->device newBufferWithBytes:&nTriA length:sizeof(int) options:opts];
+    id<MTLBuffer> bnVb = [mb->device newBufferWithBytes:&nVertB length:sizeof(int) options:opts];
+    id<MTLBuffer> bnTb = [mb->device newBufferWithBytes:&nTriB length:sizeof(int) options:opts];
+    id<MTLBuffer> bSelf = [mb->device newBufferWithBytes:&selfCollision length:sizeof(int) options:opts];
+    id<MTLBuffer> bSkip = [mb->device newBufferWithBytes:&skipSameTriangleIndex length:sizeof(int) options:opts];
+    id<MTLBuffer> bMaxH = [mb->device newBufferWithBytes:&maxHits length:sizeof(int) options:opts];
+    id<MTLBuffer> bCnt = [mb->device newBufferWithBytes:&z length:sizeof(uint32_t) options:opts];
+    id<MTLBuffer> boA = [mb->device newBufferWithLength:outBytes options:opts];
+    id<MTLBuffer> boB = [mb->device newBufferWithLength:outBytes options:opts];
+
+    if (bax == nil || bay == nil || baz == nil || btA == nil || bbx == nil || bby == nil || bbz == nil || btB == nil || bnVa == nil
+        || bnTa == nil || bnVb == nil || bnTb == nil || bSelf == nil || bSkip == nil || bMaxH == nil || bCnt == nil || boA == nil
+        || boB == nil)
+        return -84;
+
+    id<MTLComputePipelineState> pso = mb->meshMeshTriHitPso;
+    const NSUInteger maxTpg = pso.maxTotalThreadsPerThreadgroup;
+    const NSUInteger tpg = MIN(maxTpg, 256UL);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -85;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -85;
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:bax offset:0 atIndex:0];
+        [enc setBuffer:bay offset:0 atIndex:1];
+        [enc setBuffer:baz offset:0 atIndex:2];
+        [enc setBuffer:btA offset:0 atIndex:3];
+        [enc setBuffer:bnVa offset:0 atIndex:4];
+        [enc setBuffer:bnTa offset:0 atIndex:5];
+        [enc setBuffer:bbx offset:0 atIndex:6];
+        [enc setBuffer:bby offset:0 atIndex:7];
+        [enc setBuffer:bbz offset:0 atIndex:8];
+        [enc setBuffer:btB offset:0 atIndex:9];
+        [enc setBuffer:bnVb offset:0 atIndex:10];
+        [enc setBuffer:bnTb offset:0 atIndex:11];
+        [enc setBuffer:bSelf offset:0 atIndex:12];
+        [enc setBuffer:bSkip offset:0 atIndex:13];
+        [enc setBuffer:bMaxH offset:0 atIndex:14];
+        [enc setBuffer:bCnt offset:0 atIndex:15];
+        [enc setBuffer:boA offset:0 atIndex:16];
+        [enc setBuffer:boB offset:0 atIndex:17];
+        [enc dispatchThreads:MTLSizeMake(gridW, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+
+    const uint32_t totalU = *static_cast<uint32_t*>([bCnt contents]);
+    *outTotalHits = totalU > static_cast<uint32_t>(INT_MAX) ? INT_MAX : static_cast<int>(totalU);
+    memcpy(outTriA, [boA contents], outBytes);
+    memcpy(outTriB, [boB contents], outBytes);
     return 0;
 }
 

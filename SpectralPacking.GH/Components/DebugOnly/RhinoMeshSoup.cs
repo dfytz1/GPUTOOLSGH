@@ -1,7 +1,7 @@
 using Rhino.Geometry;
 using SpectralPacking.Core.Geometry;
 
-namespace SpectralPacking.GH;
+namespace SpectralPacking.GH.Components.DebugOnly;
 
 public static class RhinoMeshSoup
 {

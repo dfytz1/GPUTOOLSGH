@@ -14,7 +14,7 @@ namespace GHGPUPlugin.Chromodoris
         public IsosurfaceComponent()
           : base("Build IsoSurface", "IsoSurface",
               "Constructs a 3D isosurface mesh from voxel data and the same bounding box the grid was built on.",
-              "GPUTools", "Mesh")
+              "GPUTools", "Voxel")
         {
         }
 

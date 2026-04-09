@@ -17,10 +17,16 @@ public sealed class SpectralPackResult
     public VoxelGrid FinalOmega { get; set; } = null!;
     public int[] FinalOwner { get; set; } = Array.Empty<int>();
     public bool IsInterlockFree { get; set; }
+    /// <summary>True when the interlock resolver used out-degree fallback ordering on its last repack pass.</summary>
+    public bool UsedBlockingGraphFallbackOrder { get; set; }
+    /// <summary>True when the pack state before interlock resolution was restored because resolution emptied all placements.</summary>
+    public bool RestoredPackAfterInterlockFailure { get; set; }
 }
 
 public static class GreedyPacker
 {
+    private const int MaxSccResolutionIterations = 32;
+
     public static SpectralPackResult Pack(
         IReadOnlyList<MeshTriangleSoup> meshes,
         AxisAlignedBox trayWorld,
@@ -88,27 +94,122 @@ public static class GreedyPacker
             result.Translations.Add(t);
         }
 
-        double volTray = (trayWorld.MaxX - trayWorld.MinX) * (trayWorld.MaxY - trayWorld.MinY) * (trayWorld.MaxZ - trayWorld.MinZ);
-        double volSolid = 0;
-        for (int i = 0; i < nCell; i++)
-        {
-            if (owner[i] >= 0)
-                volSolid += dx * dx * dx;
-        }
-
-        result.PackingDensity = volTray > 1e-12 ? volSolid / volTray : 0;
+        RecomputePackingDensity(result, trayWorld, dx);
 
         int objectCount = meshes.Count;
         var adj = DirectionalBlockingGraph.BuildAdjacency(nx, ny, nz, owner, objectCount, trayWorld, voxelSize);
         var sccs = DirectionalBlockingGraph.FindSccsTarjan(objectCount, adj);
         result.IsInterlockFree = !sccs.Any(c => c.Count > 1);
 
+        SpectralPackResult? preResolveSnapshot = null;
+        if (enableInterlockResolution && !result.IsInterlockFree && result.PackedIndices.Count > 0)
+            preResolveSnapshot = ClonePackSnapshot(result);
+
         if (enableInterlockResolution && !result.IsInterlockFree)
             ResolveInterlocking(
                 meshes, trayWorld, voxelSize, result, fft, orientations, gravityWeight,
                 useParallelOrientations, useGpuDistanceField, metalCtx, refinementIterations, objectCount);
 
+        if (result.PackedIndices.Count == 0 && preResolveSnapshot != null && preResolveSnapshot.PackedIndices.Count > 0)
+        {
+            RestorePackSnapshot(result, preResolveSnapshot);
+            result.RestoredPackAfterInterlockFailure = true;
+            adj = DirectionalBlockingGraph.BuildAdjacency(nx, ny, nz, result.FinalOwner, objectCount, trayWorld, voxelSize);
+            sccs = DirectionalBlockingGraph.FindSccsTarjan(objectCount, adj);
+            result.IsInterlockFree = !sccs.Any(c => c.Count > 1);
+            RecomputePackingDensity(result, trayWorld, dx);
+        }
+
+        if (result.PackedIndices.Count == 0 && meshes.Count > 0)
+        {
+            SpectralPlacementCandidate? best = null;
+            int bestIdx = -1;
+            foreach (int objIdx in order)
+            {
+                var c = FftPlacementSearch.FindBestPlacement(
+                    omega, phi, trayWorld, voxelSize, meshes[objIdx], orientations, fft, gravityWeight, useParallelOrientations);
+                if (c != null && (best == null || c.Score < best.Score))
+                {
+                    best = c;
+                    bestIdx = objIdx;
+                }
+            }
+
+            if (best != null && bestIdx >= 0)
+            {
+                Vector3 t = best.TranslationWorld;
+                if (refinementIterations > 0)
+                    ContinuousRefinement.RefineAlongWorldZ(omega, trayWorld, voxelSize, best, meshes[bestIdx], refinementIterations, ref t);
+                FftPlacementSearch.StampCandidate(omega, best, bestIdx, owner);
+                RefreshPhi(omega, phi, (float)voxelSize, useGpuDistanceField, metalCtx);
+                result.PackedIndices.Add(bestIdx);
+                result.Rotations.Add(best.Rotation);
+                result.Translations.Add(t);
+                result.UnpackedIndices.Clear();
+                for (int i = 0; i < meshes.Count; i++)
+                {
+                    if (i != bestIdx)
+                        result.UnpackedIndices.Add(i);
+                }
+
+                adj = DirectionalBlockingGraph.BuildAdjacency(nx, ny, nz, owner, objectCount, trayWorld, voxelSize);
+                sccs = DirectionalBlockingGraph.FindSccsTarjan(objectCount, adj);
+                result.IsInterlockFree = !sccs.Any(c => c.Count > 1);
+                RecomputePackingDensity(result, trayWorld, dx);
+            }
+        }
+
         return result;
+    }
+
+    private static void RecomputePackingDensity(SpectralPackResult result, AxisAlignedBox trayWorld, double dx)
+    {
+        int nCell = result.FinalOmega.LinearSize;
+        double volTray = (trayWorld.MaxX - trayWorld.MinX) * (trayWorld.MaxY - trayWorld.MinY) * (trayWorld.MaxZ - trayWorld.MinZ);
+        double volSolid = 0;
+        for (int i = 0; i < nCell; i++)
+        {
+            if (result.FinalOwner[i] >= 0)
+                volSolid += dx * dx * dx;
+        }
+
+        result.PackingDensity = volTray > 1e-12 ? volSolid / volTray : 0;
+    }
+
+    private static SpectralPackResult ClonePackSnapshot(SpectralPackResult r)
+    {
+        var c = new SpectralPackResult
+        {
+            FinalOmega = r.FinalOmega.Clone(),
+            FinalOwner = (int[])r.FinalOwner.Clone(),
+            PackingDensity = r.PackingDensity,
+            IsInterlockFree = r.IsInterlockFree,
+            UsedBlockingGraphFallbackOrder = r.UsedBlockingGraphFallbackOrder,
+            RestoredPackAfterInterlockFailure = r.RestoredPackAfterInterlockFailure
+        };
+        c.PackedIndices.AddRange(r.PackedIndices);
+        c.Rotations.AddRange(r.Rotations);
+        c.Translations.AddRange(r.Translations);
+        c.UnpackedIndices.AddRange(r.UnpackedIndices);
+        return c;
+    }
+
+    private static void RestorePackSnapshot(SpectralPackResult target, SpectralPackResult snap)
+    {
+        target.FinalOmega.CopyFrom(snap.FinalOmega);
+        Array.Copy(snap.FinalOwner, target.FinalOwner, snap.FinalOwner.Length);
+        target.PackedIndices.Clear();
+        target.PackedIndices.AddRange(snap.PackedIndices);
+        target.Rotations.Clear();
+        target.Rotations.AddRange(snap.Rotations);
+        target.Translations.Clear();
+        target.Translations.AddRange(snap.Translations);
+        target.UnpackedIndices.Clear();
+        target.UnpackedIndices.AddRange(snap.UnpackedIndices);
+        target.PackingDensity = snap.PackingDensity;
+        target.IsInterlockFree = snap.IsInterlockFree;
+        target.UsedBlockingGraphFallbackOrder = snap.UsedBlockingGraphFallbackOrder;
+        target.RestoredPackAfterInterlockFailure = snap.RestoredPackAfterInterlockFailure;
     }
 
     private static void RefreshPhi(VoxelGrid omega, VoxelGrid phi, float voxelSize, bool useGpu, IntPtr ctx)
@@ -134,57 +235,78 @@ public static class GreedyPacker
         int objectCount)
     {
         int nx = result.FinalOmega.Width, ny = result.FinalOmega.Height, nz = result.FinalOmega.Depth;
-        var adj = DirectionalBlockingGraph.BuildAdjacency(nx, ny, nz, result.FinalOwner, objectCount, trayWorld, voxelSize);
-        var sccs = DirectionalBlockingGraph.FindSccsTarjan(objectCount, adj);
-        var removeIds = new List<int>();
-        foreach (var comp in sccs)
+        bool lastRepackUsedFallbackOrder = false;
+
+        for (int iter = 0; iter < MaxSccResolutionIterations; iter++)
         {
-            if (comp.Count < 2)
-                continue;
-            int best = comp.OrderBy(id => meshes[id].BoundingBox.Volume).First();
-            removeIds.Add(best);
-        }
+            var adj = DirectionalBlockingGraph.BuildAdjacency(nx, ny, nz, result.FinalOwner, objectCount, trayWorld, voxelSize);
+            var sccs = DirectionalBlockingGraph.FindSccsTarjan(objectCount, adj);
+            if (!sccs.Any(c => c.Count > 1))
+            {
+                result.IsInterlockFree = true;
+                result.UsedBlockingGraphFallbackOrder = false;
+                return;
+            }
 
-        foreach (int rm in removeIds)
-        {
-            int pk = result.PackedIndices.IndexOf(rm);
-            if (pk < 0)
-                continue;
-            result.PackedIndices.RemoveAt(pk);
-            result.Rotations.RemoveAt(pk);
-            result.Translations.RemoveAt(pk);
-            ClearObjectVoxels(result.FinalOmega, result.FinalOwner, rm);
-            if (!result.UnpackedIndices.Contains(rm))
-                result.UnpackedIndices.Add(rm);
-        }
+            var removeIds = new List<int>();
+            foreach (var comp in sccs)
+            {
+                if (comp.Count < 2)
+                    continue;
+                int best = comp.OrderBy(id => meshes[id].BoundingBox.Volume).First();
+                removeIds.Add(best);
+            }
 
-        RebuildOmegaAndOwner(result, meshes, trayWorld, voxelSize, nx, ny, nz);
-        var phi = VoxelGrid.CreateZero(nx, ny, nz);
-        RefreshPhi(result.FinalOmega, phi, (float)voxelSize, useGpuDf, metalCtx);
+            foreach (int rm in removeIds)
+            {
+                int pk = result.PackedIndices.IndexOf(rm);
+                if (pk < 0)
+                    continue;
+                result.PackedIndices.RemoveAt(pk);
+                result.Rotations.RemoveAt(pk);
+                result.Translations.RemoveAt(pk);
+                ClearObjectVoxels(result.FinalOmega, result.FinalOwner, rm);
+                if (!result.UnpackedIndices.Contains(rm))
+                    result.UnpackedIndices.Add(rm);
+            }
 
-        foreach (int rm in removeIds.OrderByDescending(id => meshes[id].BoundingBox.Volume))
-        {
-            var mesh = meshes[rm];
-            var cand = FftPlacementSearch.FindBestPlacement(
-                result.FinalOmega, phi, trayWorld, voxelSize, mesh, orientations, fft, gravityWeight, useParallel);
-            if (cand == null)
-                continue;
-
-            Vector3 t = cand.TranslationWorld;
-            if (refinementIterations > 0)
-                ContinuousRefinement.RefineAlongWorldZ(result.FinalOmega, trayWorld, voxelSize, cand, mesh, refinementIterations, ref t);
-
-            FftPlacementSearch.StampCandidate(result.FinalOmega, cand, rm, result.FinalOwner);
+            RebuildOmegaAndOwner(result, meshes, trayWorld, voxelSize, nx, ny, nz);
+            var phi = VoxelGrid.CreateZero(nx, ny, nz);
             RefreshPhi(result.FinalOmega, phi, (float)voxelSize, useGpuDf, metalCtx);
-            result.PackedIndices.Add(rm);
-            result.Rotations.Add(cand.Rotation);
-            result.Translations.Add(t);
-            result.UnpackedIndices.Remove(rm);
+
+            bool useFallbackRepackOrder = iter == MaxSccResolutionIterations - 1;
+            if (useFallbackRepackOrder)
+                lastRepackUsedFallbackOrder = true;
+
+            IEnumerable<int> repackOrder = useFallbackRepackOrder
+                ? DirectionalBlockingGraph.BuildFallbackRemovalOrderByAscendingOutDegree(adj, objectCount).Where(id => removeIds.Contains(id))
+                : removeIds.OrderByDescending(id => meshes[id].BoundingBox.Volume);
+
+            foreach (int rm in repackOrder)
+            {
+                var mesh = meshes[rm];
+                var cand = FftPlacementSearch.FindBestPlacement(
+                    result.FinalOmega, phi, trayWorld, voxelSize, mesh, orientations, fft, gravityWeight, useParallel);
+                if (cand == null)
+                    continue;
+
+                Vector3 t = cand.TranslationWorld;
+                if (refinementIterations > 0)
+                    ContinuousRefinement.RefineAlongWorldZ(result.FinalOmega, trayWorld, voxelSize, cand, mesh, refinementIterations, ref t);
+
+                FftPlacementSearch.StampCandidate(result.FinalOmega, cand, rm, result.FinalOwner);
+                RefreshPhi(result.FinalOmega, phi, (float)voxelSize, useGpuDf, metalCtx);
+                result.PackedIndices.Add(rm);
+                result.Rotations.Add(cand.Rotation);
+                result.Translations.Add(t);
+                result.UnpackedIndices.Remove(rm);
+            }
         }
 
-        adj = DirectionalBlockingGraph.BuildAdjacency(nx, ny, nz, result.FinalOwner, objectCount, trayWorld, voxelSize);
-        sccs = DirectionalBlockingGraph.FindSccsTarjan(objectCount, adj);
-        result.IsInterlockFree = !sccs.Any(c => c.Count > 1);
+        var adjFinal = DirectionalBlockingGraph.BuildAdjacency(nx, ny, nz, result.FinalOwner, objectCount, trayWorld, voxelSize);
+        var sccsFinal = DirectionalBlockingGraph.FindSccsTarjan(objectCount, adjFinal);
+        result.IsInterlockFree = !sccsFinal.Any(c => c.Count > 1);
+        result.UsedBlockingGraphFallbackOrder = !result.IsInterlockFree && lastRepackUsedFallbackOrder;
     }
 
     private static void ClearObjectVoxels(VoxelGrid omega, int[] owner, int objectId)

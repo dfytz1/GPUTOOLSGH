@@ -69,6 +69,24 @@ public static class DirectionalBlockingGraph
         return adj;
     }
 
+    /// <summary>
+    /// When SCC-based resolution is exhausted but cycles may remain, use ascending out-degree
+    /// (least-blocking nodes first) as a deterministic fallback priority order.
+    /// </summary>
+    public static List<int> BuildFallbackRemovalOrderByAscendingOutDegree(List<int>[] adj, int objectCount)
+    {
+        var ids = new int[objectCount];
+        for (int i = 0; i < objectCount; i++)
+            ids[i] = i;
+        Array.Sort(ids, (a, b) =>
+        {
+            int ca = adj[a].Count, cb = adj[b].Count;
+            int c = ca.CompareTo(cb);
+            return c != 0 ? c : a.CompareTo(b);
+        });
+        return ids.ToList();
+    }
+
     private static bool IsSurfaceVoxel(ReadOnlySpan<int> owner, int nx, int ny, int nz, int x, int y, int z, int self)
     {
         ReadOnlySpan<(int dx, int dy, int dz)> nb = stackalloc (int, int, int)[]

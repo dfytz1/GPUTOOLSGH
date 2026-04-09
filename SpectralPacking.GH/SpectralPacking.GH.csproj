@@ -8,26 +8,33 @@
     <TargetExt>.gha</TargetExt>
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
+
+  <!-- Spectral Pack tab (voxelize, pack, disassembly, visualizer): omitted from Release builds. -->
+  <ItemGroup Condition="'$(Configuration)' == 'Release'">
+    <Compile Remove="Components/DebugOnly/**/*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Grasshopper" Version="8.*" />
     <PackageReference Include="RhinoCommon" Version="8.*" />
     <PackageReference Include="System.Drawing.Common" Version="7.0.0" />
   </ItemGroup>
-  <ItemGroup>
+
+  <ItemGroup Condition="'$(Configuration)' == 'Debug'">
     <ProjectReference Include="..\SpectralPacking.Core\SpectralPacking.Core.csproj" />
-  </ItemGroup>
-  <ItemGroup>
     <None Include="..\MetalBridge\build\Release\MetalBridge.dylib" Link="MetalBridge.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\build\Release\MetalBridge.dylib')" />
     <None Include="..\MetalBridge\Kernels\default.metallib" Link="default.metallib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\Kernels\default.metallib')" />
   </ItemGroup>
-  <Target Name="DeployToGrasshopperLibraries" AfterTargets="Build">
+
+  <!-- Only Release deploys to Grasshopper Libraries so Debug builds do not overwrite the shipped .gha. -->
+  <Target Name="DeployToGrasshopperLibraries" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <_GrasshopperLibraries>$(HOME)/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries</_GrasshopperLibraries>
     </PropertyGroup>
     <ItemGroup>
       <_GrasshopperDeploy Include="$(TargetPath)" />
-      <_GrasshopperDeploy Include="$(TargetDir)SpectralPacking.Core.dll" />
-      <_GrasshopperDeploy Include="$(TargetDir)MathNet.Numerics.dll" />
+      <_GrasshopperDeploy Include="$(TargetDir)SpectralPacking.Core.dll" Condition="Exists('$(TargetDir)SpectralPacking.Core.dll')" />
+      <_GrasshopperDeploy Include="$(TargetDir)MathNet.Numerics.dll" Condition="Exists('$(TargetDir)MathNet.Numerics.dll')" />
       <_GrasshopperDeploy Include="$(TargetDir)MetalBridge.dylib" Condition="Exists('$(TargetDir)MetalBridge.dylib')" />
       <_GrasshopperDeploy Include="$(TargetDir)default.metallib" Condition="Exists('$(TargetDir)default.metallib')" />
     </ItemGroup>

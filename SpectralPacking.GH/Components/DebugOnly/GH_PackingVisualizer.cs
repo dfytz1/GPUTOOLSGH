@@ -4,7 +4,7 @@ using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 
-namespace SpectralPacking.GH.Components;
+namespace SpectralPacking.GH.Components.DebugOnly;
 
 public sealed class GH_PackingVisualizer : GH_Component
 {

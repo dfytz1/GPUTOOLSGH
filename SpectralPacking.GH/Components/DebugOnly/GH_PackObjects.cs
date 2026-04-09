@@ -10,7 +10,7 @@ using SpectralPacking.Core.Packing;
 using SpectralPacking.Core.Placement;
 using SpectralPacking.GH.Interop;
 
-namespace SpectralPacking.GH.Components;
+namespace SpectralPacking.GH.Components.DebugOnly;
 
 public sealed class GH_PackObjects : GH_Component
 {
@@ -75,6 +75,10 @@ public sealed class GH_PackObjects : GH_Component
             AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "VoxelSize must be positive.");
             return;
         }
+
+        if (voxelSize < 0.05)
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                "VoxelSize is small; the voxel grid may become very large. Consider increasing VoxelSize (e.g. ≥ 0.05) for faster, more stable solves.");
 
         int orientationCount = 72;
         da.GetData(3, ref orientationCount);
@@ -182,7 +186,19 @@ public sealed class GH_PackObjects : GH_Component
         da.SetDataList(2, unpacked);
         da.SetData(3, result.PackingDensity);
 
+        if (result.UsedBlockingGraphFallbackOrder)
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                "Blocking graph cycle force-broken via fallback ordering. Results may be suboptimal. Try increasing OrientationCount.");
+
         if (!result.IsInterlockFree)
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Blocking graph may still contain cycles after resolution.");
+
+        if (result.RestoredPackAfterInterlockFailure)
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                "Interlock resolution removed all placements; restored the pre-resolution pack. Consider more orientations or disabling interlock resolution.");
+
+        if (result.PackedIndices.Count == 0)
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                "No meshes were packed. Increase tray size or VoxelSize, add OrientationCount, or ensure meshes fit inside the tray.");
     }
 }

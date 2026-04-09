@@ -5,7 +5,7 @@ using Rhino.Geometry;
 using SpectralPacking.Core.Geometry;
 using SpectralPacking.Core.Voxelization;
 
-namespace SpectralPacking.GH.Components;
+namespace SpectralPacking.GH.Components.DebugOnly;
 
 public sealed class GH_VoxelizeGeometry : GH_Component
 {

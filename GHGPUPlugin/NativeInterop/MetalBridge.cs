@@ -140,6 +140,37 @@ public static class MetalBridge
         [Out] float[] outDistSq,
         [Out] int[] outIndex);
 
+    [DllImport(LibName, EntryPoint = "mb_pairwise_upper_dist_sq", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int PairwiseUpperDistSq(
+        IntPtr ctx,
+        [In] float[] x,
+        [In] float[] y,
+        [In] float[] z,
+        int n,
+        [Out] float[] outDistSq);
+
+    [DllImport(LibName, EntryPoint = "mb_mesh_mesh_triangle_hits", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int MeshMeshTriangleHits(
+        IntPtr ctx,
+        [In] float[] ax,
+        [In] float[] ay,
+        [In] float[] az,
+        [In] int[] triA,
+        int nVertA,
+        int nTriA,
+        [In] float[] bx,
+        [In] float[] by,
+        [In] float[] bz,
+        [In] int[] triB,
+        int nVertB,
+        int nTriB,
+        int selfCollision,
+        int skipSameTriangleIndex,
+        int maxHits,
+        [Out] int[] outTriA,
+        [Out] int[] outTriB,
+        [Out] int[] outTotalHits);
+
     [DllImport(LibName, EntryPoint = "mb_closest_points_mesh", CallingConvention = CallingConvention.Cdecl)]
     public static extern int ClosestPointsMesh(
         IntPtr ctx,

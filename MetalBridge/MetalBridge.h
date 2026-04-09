@@ -155,6 +155,31 @@ int mb_closest_points_cloud(
     float* outDistSq,
     int* outIndex);
 
+/// Squared distances for all unordered pairs (first index less than second). @p outDistSq length @c n*(n-1)/2 (pair index matches CPU decode of upper triangle).
+int mb_pairwise_upper_dist_sq(void* ctx, float* x, float* y, float* z, int n, float* outDistSq);
+
+/// Triangle–triangle intersection (SAT + AABB), all pairs or self upper triangle. @p outTriA/B length @p maxHits; @p outTotalHits is full count (may exceed @p maxHits).
+int mb_mesh_mesh_triangle_hits(
+    void* ctx,
+    float* ax,
+    float* ay,
+    float* az,
+    int* triA,
+    int nVertA,
+    int nTriA,
+    float* bx,
+    float* by,
+    float* bz,
+    int* triB,
+    int nVertB,
+    int nTriB,
+    int selfCollision,
+    int skipSameTriangleIndex,
+    int maxHits,
+    int* outTriA,
+    int* outTriB,
+    int* outTotalHits);
+
 /// JFA-based 2D Delaunay (Voronoi dual): @p px, @p py normalised to [0,1]. @p outEdgeA/B length @p maxEdges.
 int mb_jfa_delaunay_2d(
     void* ctx,

@@ -23,7 +23,7 @@ namespace GHGPUPlugin.Chromodoris
               "Same as Build IsoSurface. Optional S/L masks pin the field; optional SupportGeometry/LoadGeometry " +
               "(same as Voxel Paint) snap vertices onto those surfaces. CloseBoundary (default on) reapplies the " +
               "same outer-layer zero as Close Voxel Data after pinning so the box stays sealed.",
-              "GPUTools", "Mesh")
+              "GPUTools", "Voxel")
         {
         }
 
