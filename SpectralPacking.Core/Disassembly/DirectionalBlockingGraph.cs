@@ -3,7 +3,8 @@ using SpectralPacking.Core.Geometry;
 namespace SpectralPacking.Core.Disassembly;
 
 /// <summary>
-/// Axis-aligned directional blocking: edge i→j means object i blocks j for that direction sample (union over 6 axes).
+/// Axis-aligned directional blocking graph (paper DBG): edge i→j means i blocks j for that axis direction.
+/// Rays are cast from <b>surface</b> voxels of j (voxels with a 6-neighbor not belonging to j), not only the centroid.
 /// </summary>
 public static class DirectionalBlockingGraph
 {
@@ -21,39 +22,14 @@ public static class DirectionalBlockingGraph
         for (int i = 0; i < objectCount; i++)
             adj[i] = new List<int>();
 
-        var sumX = new double[objectCount];
-        var sumY = new double[objectCount];
-        var sumZ = new double[objectCount];
         var cnt = new int[objectCount];
-        double dx = voxelSize;
-
         for (int z = 0; z < nz; z++)
         for (int y = 0; y < ny; y++)
         for (int x = 0; x < nx; x++)
         {
             int oi = owner[Index(x, y, z, nx, ny)];
-            if (oi < 0)
-                continue;
-            double wx = trayWorld.MinX + (x + 0.5) * dx;
-            double wy = trayWorld.MinY + (y + 0.5) * dx;
-            double wz = trayWorld.MinZ + (z + 0.5) * dx;
-            sumX[oi] += wx;
-            sumY[oi] += wy;
-            sumZ[oi] += wz;
-            cnt[oi]++;
-        }
-
-        var cx = new double[objectCount];
-        var cy = new double[objectCount];
-        var cz = new double[objectCount];
-        for (int i = 0; i < objectCount; i++)
-        {
-            if (cnt[i] > 0)
-            {
-                cx[i] = sumX[i] / cnt[i];
-                cy[i] = sumY[i] / cnt[i];
-                cz[i] = sumZ[i] / cnt[i];
-            }
+            if (oi >= 0)
+                cnt[oi]++;
         }
 
         ReadOnlySpan<(int dx, int dy, int dz)> dirs = stackalloc (int, int, int)[]
@@ -61,19 +37,58 @@ public static class DirectionalBlockingGraph
             (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)
         };
 
+        double dx = voxelSize;
+
         for (int j = 0; j < objectCount; j++)
         {
             if (cnt[j] == 0)
                 continue;
-            for (int di = 0; di < 6; di++)
+
+            for (int z = 0; z < nz; z++)
+            for (int y = 0; y < ny; y++)
+            for (int x = 0; x < nx; x++)
             {
-                int hit = RayFirstObject(owner, nx, ny, nz, cx[j], cy[j], cz[j], dirs[di], j, trayWorld, voxelSize);
-                if (hit >= 0 && hit != j && !adj[hit].Contains(j))
-                    adj[hit].Add(j);
+                if (owner[Index(x, y, z, nx, ny)] != j)
+                    continue;
+                if (!IsSurfaceVoxel(owner, nx, ny, nz, x, y, z, j))
+                    continue;
+
+                double wx = trayWorld.MinX + (x + 0.5) * dx;
+                double wy = trayWorld.MinY + (y + 0.5) * dx;
+                double wz = trayWorld.MinZ + (z + 0.5) * dx;
+
+                for (int di = 0; di < 6; di++)
+                {
+                    int hit = RayFirstObject(owner, nx, ny, nz, wx, wy, wz, dirs[di], j, trayWorld, voxelSize);
+                    if (hit >= 0 && hit != j && !adj[hit].Contains(j))
+                        adj[hit].Add(j);
+                }
             }
         }
 
         return adj;
+    }
+
+    private static bool IsSurfaceVoxel(ReadOnlySpan<int> owner, int nx, int ny, int nz, int x, int y, int z, int self)
+    {
+        ReadOnlySpan<(int dx, int dy, int dz)> nb = stackalloc (int, int, int)[]
+        {
+            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)
+        };
+
+        for (int k = 0; k < 6; k++)
+        {
+            int nx2 = x + nb[k].dx;
+            int ny2 = y + nb[k].dy;
+            int nz2 = z + nb[k].dz;
+            if ((uint)nx2 >= (uint)nx || (uint)ny2 >= (uint)ny || (uint)nz2 >= (uint)nz)
+                return true;
+            int o = owner[Index(nx2, ny2, nz2, nx, ny)];
+            if (o != self)
+                return true;
+        }
+
+        return false;
     }
 
     private static int RayFirstObject(
@@ -141,6 +156,8 @@ public static class DirectionalBlockingGraph
 
             foreach (int w in adj[v])
             {
+                if ((uint)w >= (uint)n)
+                    continue;
                 if (index[w] < 0)
                 {
                     StrongConnect(w);

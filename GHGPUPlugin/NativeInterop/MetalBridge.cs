@@ -315,6 +315,16 @@ public static class MetalBridge
         int nz,
         float voxelSize);
 
+    [DllImport(LibName, EntryPoint = "mb_spectral_correlate_real3d", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SpectralCorrelateReal3d(
+        IntPtr ctx,
+        [In] float[] paddedA,
+        [In] float[] paddedB,
+        int px,
+        int py,
+        int pz,
+        [Out] float[] correlationOut);
+
     [DllImport(LibName, EntryPoint = "mb_spectral_voxel_columns", CallingConvention = CallingConvention.Cdecl)]
     public static extern int SpectralVoxelColumns(
         IntPtr ctx,

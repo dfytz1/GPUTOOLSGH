@@ -30,6 +30,9 @@ public static class FftPlacementSearch
 
         void Body(int oi)
         {
+            if (meshWorld.VertexCount == 0)
+                return;
+
             Matrix4x4 R = orientations[oi];
             var meshR = meshWorld.RotatedAboutCentroid(
                 R.M11, R.M12, R.M13,
@@ -80,7 +83,10 @@ public static class FftPlacementSearch
             for (int ty = 0; ty <= ny - sy; ty++)
             for (int tx = 0; tx <= nx - sx; tx++)
             {
-                int idx = tx + ty * ppx + tz * ppx * ppy;
+                long idxL = (long)tx + (long)ty * ppx + (long)tz * ppx * ppy;
+                if (idxL < 0 || idxL >= ppn)
+                    continue;
+                int idx = (int)idxL;
                 if (z[idx] > CollisionEps)
                     continue;
                 float g = (float)(gravityWeight * tz * voxelSize);
@@ -162,6 +168,9 @@ public static class FftPlacementSearch
         double voxelSize,
         int tx, int ty, int tz)
     {
+        if (meshR.VertexCount == 0)
+            return Vector3.Zero;
+
         double brMinX = meshR.Vx[0], brMinY = meshR.Vy[0], brMinZ = meshR.Vz[0];
         for (int i = 1; i < meshR.VertexCount; i++)
         {

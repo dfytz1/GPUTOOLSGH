@@ -1,11 +1,13 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <Accelerate/Accelerate.h>
 #include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
+#include <mutex>
 #include <queue>
 #include <vector>
 
@@ -1361,6 +1363,137 @@ static void MbDispatch1D(id<MTLComputeCommandEncoder> enc, id<MTLComputePipeline
 
 } // namespace
 
+namespace spectral_fft {
+
+static bool IsPow2(int n)
+{
+    return n > 0 && (n & (n - 1)) == 0;
+}
+
+static unsigned FloorLog2(unsigned n)
+{
+    unsigned l = 0;
+    unsigned t = n;
+    while (t > 1u)
+    {
+        l++;
+        t >>= 1u;
+    }
+    return (n == (1u << l)) ? l : ~0u;
+}
+
+static std::mutex g_fftSetupMutex;
+static FFTSetup g_fftSetup = nullptr;
+static unsigned g_fftMaxLog2 = 0;
+
+static FFTSetup fft_setup_acquire(unsigned maxLog2)
+{
+    std::lock_guard<std::mutex> lock(g_fftSetupMutex);
+    if (maxLog2 > g_fftMaxLog2)
+    {
+        if (g_fftSetup != nullptr)
+        {
+            vDSP_destroy_fftsetup(g_fftSetup);
+            g_fftSetup = nullptr;
+        }
+        g_fftSetup = vDSP_create_fftsetup(maxLog2, kFFTRadix2);
+        if (g_fftSetup == nullptr)
+            return nullptr;
+        g_fftMaxLog2 = maxLog2;
+    }
+    return g_fftSetup;
+}
+
+static void fft_pass_axis_x(float* re, float* im, int px, int py, int pz, FFTSetup st, FFTDirection dir, unsigned log2px)
+{
+    for (int z = 0; z < pz; ++z)
+        for (int y = 0; y < py; ++y)
+        {
+            const size_t base = static_cast<size_t>(y * px + z * px * py);
+            DSPSplitComplex sp = {re + base, im + base};
+            vDSP_fft_zop(st, &sp, 1, &sp, 1, log2px, dir);
+        }
+}
+
+static void fft_pass_axis_y(float* re, float* im, int px, int py, int pz, FFTSetup st, FFTDirection dir, unsigned log2py)
+{
+    const vDSP_Stride stry = static_cast<vDSP_Stride>(px);
+    for (int z = 0; z < pz; ++z)
+        for (int x = 0; x < px; ++x)
+        {
+            const size_t base = static_cast<size_t>(x + z * px * py);
+            DSPSplitComplex sp = {re + base, im + base};
+            vDSP_fft_zop(st, &sp, stry, &sp, stry, log2py, dir);
+        }
+}
+
+static void fft_pass_axis_z(float* re, float* im, int px, int py, int pz, FFTSetup st, FFTDirection dir, unsigned log2pz)
+{
+    const vDSP_Stride strz = static_cast<vDSP_Stride>(px * py);
+    for (int y = 0; y < py; ++y)
+        for (int x = 0; x < px; ++x)
+        {
+            const size_t base = static_cast<size_t>(x + y * px);
+            DSPSplitComplex sp = {re + base, im + base};
+            vDSP_fft_zop(st, &sp, strz, &sp, strz, log2pz, dir);
+        }
+}
+
+static void fft3d_forward(float* re, float* im, int px, int py, int pz, FFTSetup st, unsigned lx, unsigned ly, unsigned lz)
+{
+    fft_pass_axis_x(re, im, px, py, pz, st, kFFTDirection_Forward, lx);
+    fft_pass_axis_y(re, im, px, py, pz, st, kFFTDirection_Forward, ly);
+    fft_pass_axis_z(re, im, px, py, pz, st, kFFTDirection_Forward, lz);
+}
+
+static void fft3d_inverse(float* re, float* im, int px, int py, int pz, FFTSetup st, unsigned lx, unsigned ly, unsigned lz)
+{
+    fft_pass_axis_z(re, im, px, py, pz, st, kFFTDirection_Inverse, lz);
+    fft_pass_axis_y(re, im, px, py, pz, st, kFFTDirection_Inverse, ly);
+    fft_pass_axis_x(re, im, px, py, pz, st, kFFTDirection_Inverse, lx);
+}
+
+/// R = IFFT( FFT(A) · conj(FFT(B)) ), real signals zero-padded to px×py×pz (powers of two, row-major x fastest).
+static int correlate_real3d(const float* paddedA, const float* paddedB, int px, int py, int pz, float* out)
+{
+    if (!IsPow2(px) || !IsPow2(py) || !IsPow2(pz))
+        return -2;
+    const unsigned lx = FloorLog2(static_cast<unsigned>(px));
+    const unsigned ly = FloorLog2(static_cast<unsigned>(py));
+    const unsigned lz = FloorLog2(static_cast<unsigned>(pz));
+    if (lx == ~0u || ly == ~0u || lz == ~0u)
+        return -2;
+    const unsigned maxL = std::max({lx, ly, lz});
+    FFTSetup st = fft_setup_acquire(maxL);
+    if (st == nullptr)
+        return -3;
+
+    const size_t n = static_cast<size_t>(px) * static_cast<size_t>(py) * static_cast<size_t>(pz);
+    std::vector<float> reA(n), imA(n), reB(n), imB(n), reC(n), imC(n);
+    memcpy(reA.data(), paddedA, n * sizeof(float));
+    memset(imA.data(), 0, n * sizeof(float));
+    memcpy(reB.data(), paddedB, n * sizeof(float));
+    memset(imB.data(), 0, n * sizeof(float));
+
+    fft3d_forward(reA.data(), imA.data(), px, py, pz, st, lx, ly, lz);
+    fft3d_forward(reB.data(), imB.data(), px, py, pz, st, lx, ly, lz);
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const float ar = reA[i], ai = imA[i];
+        const float br = reB[i], bi = imB[i];
+        // A * conj(B)
+        reC[i] = ar * br + ai * bi;
+        imC[i] = ai * br - ar * bi;
+    }
+
+    fft3d_inverse(reC.data(), imC.data(), px, py, pz, st, lx, ly, lz);
+    memcpy(out, reC.data(), n * sizeof(float));
+    return 0;
+}
+
+} // namespace spectral_fft
+
 extern "C" {
 
 int mb_laplace_jacobi_3d(
@@ -2702,6 +2835,23 @@ int mb_aniso_cvt_project_boundary_segments(
     memcpy(posY, [b1 contents], pbytes);
     memcpy(posZ, [b2 contents], pbytes);
     return 0;
+}
+
+int mb_spectral_correlate_real3d(
+    void* ctx,
+    const float* paddedA,
+    const float* paddedB,
+    int px,
+    int py,
+    int pz,
+    float* correlationOut)
+{
+    (void)ctx;
+    if (paddedA == nullptr || paddedB == nullptr || correlationOut == nullptr)
+        return -1;
+    if (px < 1 || py < 1 || pz < 1)
+        return -1;
+    return spectral_fft::correlate_real3d(paddedA, paddedB, px, py, pz, correlationOut);
 }
 
 int mb_spectral_df_bfs(

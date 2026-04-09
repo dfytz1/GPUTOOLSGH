@@ -1,5 +1,6 @@
 using System.Numerics;
 using MathNet.Numerics.IntegralTransforms;
+using SpectralPacking.Core.Native;
 
 namespace SpectralPacking.Core.Metrics;
 
@@ -71,10 +72,13 @@ public sealed class MathNetFFTBackend : IFFTBackend
     }
 }
 
-/// <summary>Uses MetalBridge spectral entry points when available; otherwise delegates to <see cref="MathNetFFTBackend"/>.</summary>
+/// <summary>
+/// Uses MetalBridge <c>mb_spectral_correlate_real3d</c> (Accelerate vDSP separable radix-2 3D FFT on CPU, heavily vectorized on Apple Silicon).
+/// Falls back to <see cref="MathNetFFTBackend"/> if the native call fails (e.g. non–power-of-two dimensions, missing dylib).
+/// </summary>
 public sealed class MetalFFTBackend : IFFTBackend
 {
-    private readonly MathNetFFTBackend _cpu = new();
+    private readonly MathNetFFTBackend _fallback = new();
 
     public void CorrelateReal3D(
         ReadOnlySpan<float> paddedA,
@@ -82,8 +86,9 @@ public sealed class MetalFFTBackend : IFFTBackend
         int px, int py, int pz,
         Span<float> correlationRealOut)
     {
-        // Native batched Metal FFT can replace this path; current bridge focuses on voxel + DF kernels.
-        _cpu.CorrelateReal3D(paddedA, paddedB, px, py, pz, correlationRealOut);
+        if (MetalSpectralInterop.TryCorrelateReal3d(IntPtr.Zero, paddedA, paddedB, px, py, pz, correlationRealOut) == 0)
+            return;
+        _fallback.CorrelateReal3D(paddedA, paddedB, px, py, pz, correlationRealOut);
     }
 }
 

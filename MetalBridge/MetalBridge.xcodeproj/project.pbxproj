@@ -212,6 +212,8 @@
 					Metal,
 					"-framework",
 					Foundation,
+					"-framework",
+					Accelerate,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -233,6 +235,8 @@
 					Metal,
 					"-framework",
 					Foundation,
+					"-framework",
+					Accelerate,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;

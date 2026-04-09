@@ -295,6 +295,18 @@ int mb_aniso_cvt_project_boundary_segments(
     const float* segBz,
     int nSeg);
 
+/// 3D linear cross-correlation via separable radix-2 FFT (Accelerate vDSP). Grids must be powers of two; layout x + y*px + z*px*py.
+/// Computes R = IFFT( FFT(A) · conj(FFT(B)) ) (real output).
+/// @return 0 on success, -1 invalid args, -2 non-power-of-two dimension, -3 FFT setup failure.
+int mb_spectral_correlate_real3d(
+    void* ctx,
+    const float* paddedA,
+    const float* paddedB,
+    int px,
+    int py,
+    int pz,
+    float* correlationOut);
+
 /// Multi-source BFS distance field in empty voxels (6-neighbor); solid voxels get phi=0.
 /// @return 0 on success.
 int mb_spectral_df_bfs(

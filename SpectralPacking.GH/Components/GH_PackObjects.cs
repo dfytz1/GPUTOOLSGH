@@ -32,7 +32,7 @@ public sealed class GH_PackObjects : GH_Component
         pManager.AddIntegerParameter("OrientationCount", "Ori", "Number of sampled orientations", GH_ParamAccess.item, 72);
         pManager.AddNumberParameter("GravityWeight", "G", "Penalty weight for high Z placements", GH_ParamAccess.item, 0);
         pManager.AddBooleanParameter("EnableInterlockCheck", "IL", "Resolve interlocking SCCs after packing", GH_ParamAccess.item, true);
-        pManager.AddBooleanParameter("UseGPU", "GPU", "Use MetalBridge for distance field (FFT stays MathNet)", GH_ParamAccess.item, true);
+        pManager.AddBooleanParameter("UseGPU", "GPU", "Native BFS distance field via Metal device context. 3D FFT correlation uses Accelerate vDSP in MetalBridge.dylib whenever the dylib loads (independent of this flag).", GH_ParamAccess.item, true);
         pManager.AddBooleanParameter("UseParallel", "||", "Parallel.For over orientations (CPU)", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Run", "Run", "Execute solve", GH_ParamAccess.item, true);
         pManager.AddIntegerParameter("OrientationMode", "Om", "0 = uniform Euler, 1 = icosphere mix", GH_ParamAccess.item, 0);
@@ -133,7 +133,8 @@ public sealed class GH_PackObjects : GH_Component
         if (useGpu && !gpuOk)
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, $"GPU distance field unavailable: {MetalSharedContext.InitError ?? NativeLoader.LoadError ?? "unknown"}");
 
-        IFFTBackend fft = useGpu && gpuOk ? new MetalFFTBackend() : new MathNetFFTBackend();
+        // vDSP 3D FFT lives in MetalBridge.dylib and does not require a Metal device; always try native correlation first.
+        IFFTBackend fft = new MetalFFTBackend();
         var mode = orientationMode != 0 ? OrientationSamplingMode.Icosphere : OrientationSamplingMode.UniformEuler;
 
         SpectralPackResult result;

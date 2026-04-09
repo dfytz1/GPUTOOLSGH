@@ -38,6 +38,53 @@ public static class MetalSpectralInterop
         int nz,
         float voxelSize);
 
+    [DllImport(LibName, EntryPoint = "mb_spectral_correlate_real3d", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SpectralCorrelateReal3d(
+        IntPtr ctx,
+        [In] float[] paddedA,
+        [In] float[] paddedB,
+        int px,
+        int py,
+        int pz,
+        [Out] float[] correlationOut);
+
+    /// <summary>Accelerate vDSP 3D FFT correlation in MetalBridge (CPU vectorized). px,py,pz must be powers of two.</summary>
+    /// <returns>0 on success.</returns>
+    public static int TryCorrelateReal3d(
+        IntPtr ctx,
+        ReadOnlySpan<float> paddedA,
+        ReadOnlySpan<float> paddedB,
+        int px,
+        int py,
+        int pz,
+        Span<float> correlationOut)
+    {
+        int n = px * py * pz;
+        if (paddedA.Length < n || paddedB.Length < n || correlationOut.Length < n)
+            return -1;
+        try
+        {
+            var a = new float[n];
+            var b = new float[n];
+            var o = new float[n];
+            paddedA.Slice(0, n).CopyTo(a);
+            paddedB.Slice(0, n).CopyTo(b);
+            int code = SpectralCorrelateReal3d(ctx, a, b, px, py, pz, o);
+            if (code != 0)
+                return code;
+            o.AsSpan(0, n).CopyTo(correlationOut);
+            return 0;
+        }
+        catch (DllNotFoundException)
+        {
+            return -4;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return -5;
+        }
+    }
+
     /// <returns>0 if native path ran successfully.</returns>
     public static int TryDistanceFieldBfs(IntPtr ctx, VoxelGrid solidBinary, VoxelGrid phiOut, float voxelSize)
     {
