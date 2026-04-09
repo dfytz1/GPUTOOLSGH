@@ -10,6 +10,12 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
 
+  <!-- Debug-only Grasshopper components (Field, Aniso CVT remesh, Voxel SIMP Auto): omitted from Release builds. -->
+  <ItemGroup Condition="'$(Configuration)' == 'Release'">
+    <Compile Remove="Components/DebugOnly/**/*.cs" />
+    <Compile Remove="Chromodoris/components/DebugOnly/**/*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Grasshopper" Version="8.*" />
     <PackageReference Include="RhinoCommon" Version="8.*" />

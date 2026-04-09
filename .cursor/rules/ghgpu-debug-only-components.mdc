@@ -1,0 +1,31 @@
+---
+description: Debug-only GHGPUPlugin Grasshopper components (Release vs Debug builds)
+alwaysApply: false
+---
+
+# GHGPUPlugin — debug-only components
+
+## Location
+
+Place Grasshopper components that **must not ship in the Release `.gha`** under:
+
+- `GHGPUPlugin/Components/DebugOnly/` — including `Field/` (reaction–diffusion, field mesh tools), anisotropic CVT remesh, and any supporting `.cs` files used **only** by those components (e.g. `DebugOnly/Algorithms/`).
+- `GHGPUPlugin/Chromodoris/components/DebugOnly/` — Chromodoris-tab debug components (e.g. **Voxel SIMP Auto GPU**).
+
+## Build rule
+
+`GHGPUPlugin.csproj` **excludes** those trees when `'$(Configuration)' == 'Release'` via `<Compile Remove=".../**/*.cs" />`.
+
+- **Debug** builds: full plugin including experimental field / auto-SIMP / aniso remesh.
+- **Release** builds: those sources are not compiled; they do not appear in Grasshopper.
+
+## Registration
+
+- **`GrasshopperGpuToolsRegistration`**: wrap `typeof(...)` entries for debug-only GPUTools components in `#if DEBUG` (Release uses `Array.Empty<Type>()` so no missing types).
+- **`GrasshopperVoxelTabRegistration`**: wrap `typeof(VoxelSimpAutoComponent)` in `#if DEBUG`.
+
+## When adding a new non-release component
+
+1. Put the component source under one of the `DebugOnly` folders above (or add a new `DebugOnly` subtree and extend `<Compile Remove>` in the `.csproj` if needed).
+2. Add `typeof(YourComponent)` inside the existing `#if DEBUG` block in the appropriate registration class.
+3. Do not reference debug-only types from code that compiles in **Release** (no `typeof` / no API calls without `#if DEBUG`).

@@ -53,15 +53,12 @@ namespace GHGPUPlugin.Chromodoris
                 "If true, store upsampled float[x,y,z] density per outer iteration in DensityHistory (more memory).", GH_ParamAccess.item, false);
             pManager.AddNumberParameter("FilterRadius", "Fr",
                 "Sensitivity filter radius in element units (0 = off, 1.5 recommended).", GH_ParamAccess.item, 1.5);
-            pManager.AddBooleanParameter("EnforceConnectivity", "Conn",
-                "After OC, bridge support–load if no rho-above-0.05 path (from iteration 4 onward).", GH_ParamAccess.item, true);
             pManager[14].Optional = true;
             pManager[15].Optional = true;
             pManager[16].Optional = true;
             pManager[18].Optional = true;
             pManager[19].Optional = true;
             pManager[20].Optional = true;
-            pManager[21].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
@@ -98,7 +95,6 @@ namespace GHGPUPlugin.Chromodoris
             bool useGpu = true;
             bool recordHistory = false;
             double filterRadius = 1.5;
-            bool enforceConn = true;
             double simpP = 3, move = 0.2, emin = 1e-6, nu = 0.3;
             var loadPts = new List<Point3d>();
             var loadVecs = new List<Vector3d>();
@@ -167,7 +163,6 @@ namespace GHGPUPlugin.Chromodoris
             DA.GetData(18, ref useGpu);
             DA.GetData(19, ref recordHistory);
             DA.GetData(20, ref filterRadius);
-            DA.GetData(21, ref enforceConn);
 
             if (useGpu)
             {
@@ -255,7 +250,7 @@ namespace GHGPUPlugin.Chromodoris
                     box, loadPts, loadVecs, youngE, supPts, supDirs,
                     vf,
                     outer, pcg, simpP, move, emin, nu, maxEl, solveStride, useGpu, recordHistory, filterRadius,
-                    penaltyContinuation: false, enforceConnectivity: enforceConn);
+                    penaltyContinuation: false);
             }
             catch (Exception ex)
             {

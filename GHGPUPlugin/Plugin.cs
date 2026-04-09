@@ -30,6 +30,7 @@ public class Plugin : GH_AssemblyInfo
         NativeLoader.EnsureLoaded();
         AccelerateInterop.EnsureLoaded();
         _ = GrasshopperVoxelTabRegistration.ComponentTypes.Length;
+        _ = GrasshopperGpuToolsRegistration.ComponentTypes.Length;
         _ = _finalizer;
     }
 

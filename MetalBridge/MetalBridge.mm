@@ -1,10 +1,12 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
+#include <queue>
 #include <vector>
 
 #include "MetalBridge.h"
@@ -38,6 +40,17 @@ struct MBContext {
     id<MTLComputePipelineState> pcgUintToFloatPso = nil;
     id<MTLComputePipelineState> voxelSamplePso = nil;
     id<MTLComputePipelineState> proximityBlendPso = nil;
+    id<MTLComputePipelineState> grayScott2dPso = nil;
+
+    id<MTLComputePipelineState> anisoMetricTopoPso = nil;
+    id<MTLComputePipelineState> acClearAtomicPso = nil;
+    id<MTLComputePipelineState> acCountCellsPso = nil;
+    id<MTLComputePipelineState> acScatterPso = nil;
+    id<MTLComputePipelineState> acRepulsePso = nil;
+    id<MTLComputePipelineState> acBuildAdjPso = nil;
+    id<MTLComputePipelineState> acLapDegPso = nil;
+    id<MTLComputePipelineState> acCopyXyzPso = nil;
+    id<MTLComputePipelineState> acBoundarySegPso = nil;
 
     // Laplacian: reuse GPU memory across iterations (topology size must match).
     id<MTLBuffer> lapBxIn = nil;
@@ -324,10 +337,21 @@ int mb_create_context(void** outCtx)
         id<MTLComputePipelineState> pcgU2f = MakePso(device, library, @"pcg_uint_to_float", &err);
         id<MTLComputePipelineState> vsmp = MakePso(device, library, @"voxel_sample_kernel", &err);
         id<MTLComputePipelineState> prxb = MakePso(device, library, @"proximity_blend_kernel", &err);
+        id<MTLComputePipelineState> gs2 = MakePso(device, library, @"gray_scott_step_kernel", &err);
+        id<MTLComputePipelineState> am = MakePso(device, library, @"aniso_metric_topo_kernel", &err);
+        id<MTLComputePipelineState> ac0 = MakePso(device, library, @"ac_clear_atomic_int_kernel", &err);
+        id<MTLComputePipelineState> ac1 = MakePso(device, library, @"ac_count_cells_kernel", &err);
+        id<MTLComputePipelineState> ac2 = MakePso(device, library, @"ac_scatter_kernel", &err);
+        id<MTLComputePipelineState> ac3 = MakePso(device, library, @"ac_aniso_repulse_kernel", &err);
+        id<MTLComputePipelineState> ac4 = MakePso(device, library, @"ac_build_adj_deg_kernel", &err);
+        id<MTLComputePipelineState> ac5 = MakePso(device, library, @"ac_laplacian_constrained_deg_kernel", &err);
+        id<MTLComputePipelineState> ac6 = MakePso(device, library, @"ac_copy_xyz_kernel", &err);
+        id<MTLComputePipelineState> ac7 = MakePso(device, library, @"ac_project_boundary_segments_kernel", &err);
         if (bench == nil || lap == nil || cls == nil || cld == nil || edg == nil || jfaI == nil || jfaS == nil || jfaE == nil
             || lj3 == nil || gm3 == nil || nc3 == nil || zvb == nil || lapC == nil || fmv == nil || fmfp == nil || pcgAx == nil
             || pcgPc == nil || pcgDp == nil || pcgRl == nil || pcgRd == nil || pcgCp == nil || pcgU2f == nil || vsmp == nil
-            || prxb == nil)
+            || prxb == nil || gs2 == nil || am == nil || ac0 == nil || ac1 == nil || ac2 == nil || ac3 == nil || ac4 == nil
+            || ac5 == nil || ac6 == nil || ac7 == nil)
             return -5;
 
         id<MTLCommandQueue> queue = [device newCommandQueue];
@@ -361,6 +385,16 @@ int mb_create_context(void** outCtx)
         ctx->pcgUintToFloatPso = pcgU2f;
         ctx->voxelSamplePso = vsmp;
         ctx->proximityBlendPso = prxb;
+        ctx->grayScott2dPso = gs2;
+        ctx->anisoMetricTopoPso = am;
+        ctx->acClearAtomicPso = ac0;
+        ctx->acCountCellsPso = ac1;
+        ctx->acScatterPso = ac2;
+        ctx->acRepulsePso = ac3;
+        ctx->acBuildAdjPso = ac4;
+        ctx->acLapDegPso = ac5;
+        ctx->acCopyXyzPso = ac6;
+        ctx->acBoundarySegPso = ac7;
         *outCtx = ctx;
         return 0;
     }
@@ -395,6 +429,16 @@ void mb_destroy_context(void* ctx)
     mb->pcgUintToFloatPso = nil;
     mb->voxelSamplePso = nil;
     mb->proximityBlendPso = nil;
+    mb->grayScott2dPso = nil;
+    mb->anisoMetricTopoPso = nil;
+    mb->acClearAtomicPso = nil;
+    mb->acCountCellsPso = nil;
+    mb->acScatterPso = nil;
+    mb->acRepulsePso = nil;
+    mb->acBuildAdjPso = nil;
+    mb->acLapDegPso = nil;
+    mb->acCopyXyzPso = nil;
+    mb->acBoundarySegPso = nil;
     mb->lapBxIn = mb->lapByIn = mb->lapBzIn = nil;
     mb->lapBxOut = mb->lapByOut = mb->lapBzOut = nil;
     mb->lapAdj = mb->lapOff = mb->lapVc = mb->lapStr = nil;
@@ -1305,6 +1349,16 @@ static void MbEncodeAxpy(
         threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
 }
 
+constexpr int kAnisoDegMax = 64;
+
+static void MbDispatch1D(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso, NSUInteger count)
+{
+    if (count == 0u)
+        return;
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(pso);
+    [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+}
+
 } // namespace
 
 extern "C" {
@@ -2160,6 +2214,603 @@ int mb_proximity_blend(
 
     memcpy(densityOut, [bOut contents], gridBytes);
     return 0;
+}
+
+int mb_gray_scott_2d(
+    void* ctx,
+    float* a,
+    float* b,
+    int nx,
+    int ny,
+    int iterations,
+    float dt,
+    float f,
+    float k,
+    float dA,
+    float dB)
+{
+    if (ctx == nullptr || a == nullptr || b == nullptr)
+        return -1;
+    if (nx <= 0 || ny <= 0 || iterations < 1)
+        return -1;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->grayScott2dPso == nil)
+        return -1;
+
+    const int total = nx * ny;
+    const NSUInteger gridBytes = static_cast<NSUInteger>(total) * sizeof(float);
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+
+    id<MTLBuffer> bA0 = [mb->device newBufferWithLength:gridBytes options:opts];
+    id<MTLBuffer> bB0 = [mb->device newBufferWithLength:gridBytes options:opts];
+    id<MTLBuffer> bA1 = [mb->device newBufferWithLength:gridBytes options:opts];
+    id<MTLBuffer> bB1 = [mb->device newBufferWithLength:gridBytes options:opts];
+    if (bA0 == nil || bB0 == nil || bA1 == nil || bB1 == nil)
+        return -1;
+
+    memcpy([bA0 contents], a, gridBytes);
+    memcpy([bB0 contents], b, gridBytes);
+
+    float par[5] = {dt, f, k, dA, dB};
+    id<MTLBuffer> bPar = [mb->device newBufferWithBytes:par length:sizeof(par) options:opts];
+    int dims[2] = {nx, ny};
+    id<MTLBuffer> bDims = [mb->device newBufferWithBytes:dims length:sizeof(dims) options:opts];
+    id<MTLBuffer> bTot = [mb->device newBufferWithBytes:&total length:sizeof(total) options:opts];
+    if (bPar == nil || bDims == nil || bTot == nil)
+        return -1;
+
+    id<MTLComputePipelineState> pso = mb->grayScott2dPso;
+    const NSUInteger tpg = MbThreadsPerThreadgroup1D(pso);
+    const NSUInteger threadCount = static_cast<NSUInteger>(total);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -1;
+
+        id<MTLBuffer> curA = bA0;
+        id<MTLBuffer> curB = bB0;
+        id<MTLBuffer> nxtA = bA1;
+        id<MTLBuffer> nxtB = bB1;
+
+        for (int it = 0; it < iterations; ++it) {
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (enc == nil)
+                return -1;
+
+            [enc setComputePipelineState:pso];
+            [enc setBuffer:curA offset:0 atIndex:0];
+            [enc setBuffer:curB offset:0 atIndex:1];
+            [enc setBuffer:nxtA offset:0 atIndex:2];
+            [enc setBuffer:nxtB offset:0 atIndex:3];
+            [enc setBuffer:bPar offset:0 atIndex:4];
+            [enc setBuffer:bDims offset:0 atIndex:5];
+            [enc setBuffer:bTot offset:0 atIndex:6];
+            [enc dispatchThreads:MTLSizeMake(threadCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+            [enc endEncoding];
+
+            id<MTLBuffer> t = curA;
+            curA = nxtA;
+            nxtA = t;
+            t = curB;
+            curB = nxtB;
+            nxtB = t;
+        }
+
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        const bool resultOnAB0 = (iterations % 2) == 0;
+        id<MTLBuffer> outA = resultOnAB0 ? bA0 : bA1;
+        id<MTLBuffer> outB = resultOnAB0 ? bB0 : bB1;
+        memcpy(a, [outA contents], gridBytes);
+        memcpy(b, [outB contents], gridBytes);
+    }
+    return 0;
+}
+
+int mb_aniso_cvt_compute_metric_topo(
+    void* ctx,
+    const float* px,
+    const float* py,
+    const float* pz,
+    const float* nx,
+    const float* ny,
+    const float* nz,
+    const int* adjFlat,
+    const float* cotW,
+    const int* rowOff,
+    const float* mixedArea,
+    const float* angleSum,
+    const unsigned char* isBoundary,
+    int nTopo,
+    float alpha,
+    float* outMetric9)
+{
+    if (ctx == nullptr || nTopo <= 0 || px == nullptr || py == nullptr || pz == nullptr || nx == nullptr || ny == nullptr
+        || nz == nullptr || adjFlat == nullptr || cotW == nullptr || rowOff == nullptr || mixedArea == nullptr
+        || angleSum == nullptr || isBoundary == nullptr || outMetric9 == nullptr)
+        return -400;
+    const int nnz = rowOff[nTopo];
+    if (nnz < 0)
+        return -401;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->anisoMetricTopoPso == nil)
+        return -402;
+
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+    const NSUInteger n = static_cast<NSUInteger>(nTopo);
+    const NSUInteger fbytes = n * sizeof(float);
+    const NSUInteger ibytes = static_cast<NSUInteger>(nnz) * sizeof(int);
+    const NSUInteger cwbytes = static_cast<NSUInteger>(nnz) * sizeof(float);
+    const NSUInteger offbytes = (n + 1u) * sizeof(int);
+    const NSUInteger obytes = n * 9u * sizeof(float);
+
+    id<MTLBuffer> bpx = [mb->device newBufferWithBytes:px length:fbytes options:opts];
+    id<MTLBuffer> bpy = [mb->device newBufferWithBytes:py length:fbytes options:opts];
+    id<MTLBuffer> bpz = [mb->device newBufferWithBytes:pz length:fbytes options:opts];
+    id<MTLBuffer> bnx = [mb->device newBufferWithBytes:nx length:fbytes options:opts];
+    id<MTLBuffer> bny = [mb->device newBufferWithBytes:ny length:fbytes options:opts];
+    id<MTLBuffer> bnz = [mb->device newBufferWithBytes:nz length:fbytes options:opts];
+    id<MTLBuffer> badj = [mb->device newBufferWithBytes:adjFlat length:ibytes options:opts];
+    id<MTLBuffer> bcw = [mb->device newBufferWithBytes:cotW length:cwbytes options:opts];
+    id<MTLBuffer> bro = [mb->device newBufferWithBytes:rowOff length:offbytes options:opts];
+    id<MTLBuffer> bma = [mb->device newBufferWithBytes:mixedArea length:fbytes options:opts];
+    id<MTLBuffer> bas = [mb->device newBufferWithBytes:angleSum length:fbytes options:opts];
+    id<MTLBuffer> bbd = [mb->device newBufferWithBytes:isBoundary length:n * sizeof(unsigned char) options:opts];
+    id<MTLBuffer> bal = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    id<MTLBuffer> bnt = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    id<MTLBuffer> bout = [mb->device newBufferWithLength:obytes options:opts];
+    if (bpx == nil || bpy == nil || bpz == nil || bnx == nil || bny == nil || bnz == nil || badj == nil || bcw == nil
+        || bro == nil || bma == nil || bas == nil || bbd == nil || bal == nil || bnt == nil || bout == nil)
+        return -403;
+    *static_cast<float*>([bal contents]) = alpha;
+    *static_cast<int*>([bnt contents]) = nTopo;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -404;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -405;
+        [enc setComputePipelineState:mb->anisoMetricTopoPso];
+        [enc setBuffer:bpx offset:0 atIndex:0];
+        [enc setBuffer:bpy offset:0 atIndex:1];
+        [enc setBuffer:bpz offset:0 atIndex:2];
+        [enc setBuffer:bnx offset:0 atIndex:3];
+        [enc setBuffer:bny offset:0 atIndex:4];
+        [enc setBuffer:bnz offset:0 atIndex:5];
+        [enc setBuffer:badj offset:0 atIndex:6];
+        [enc setBuffer:bcw offset:0 atIndex:7];
+        [enc setBuffer:bro offset:0 atIndex:8];
+        [enc setBuffer:bma offset:0 atIndex:9];
+        [enc setBuffer:bas offset:0 atIndex:10];
+        [enc setBuffer:bbd offset:0 atIndex:11];
+        [enc setBuffer:bal offset:0 atIndex:12];
+        [enc setBuffer:bnt offset:0 atIndex:13];
+        [enc setBuffer:bout offset:0 atIndex:14];
+        MbDispatch1D(enc, mb->anisoMetricTopoPso, n);
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+    memcpy(outMetric9, [bout contents], obytes);
+    return 0;
+}
+
+int mb_aniso_cvt_particle_gpu_pre_project(
+    void* ctx,
+    float* posX,
+    float* posY,
+    float* posZ,
+    const float* metric9,
+    const unsigned char* fixedMask,
+    int particleCount,
+    float bbMinX,
+    float bbMinY,
+    float bbMinZ,
+    int dimX,
+    int dimY,
+    int dimZ,
+    float cellSize,
+    float invCell,
+    float targetSpacing,
+    float repulsionStrength,
+    float lapStrength)
+{
+    if (ctx == nullptr || particleCount <= 0 || posX == nullptr || posY == nullptr || posZ == nullptr || metric9 == nullptr
+        || fixedMask == nullptr)
+        return -410;
+    if (dimX <= 0 || dimY <= 0 || dimZ <= 0 || cellSize <= 0.f || invCell <= 0.f)
+        return -411;
+    const int64_t nCells64 = static_cast<int64_t>(dimX) * dimY * dimZ;
+    if (nCells64 > static_cast<int64_t>(INT_MAX / 2))
+        return -412;
+    const int nCells = static_cast<int>(nCells64);
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->acClearAtomicPso == nil || mb->acCountCellsPso == nil || mb->acScatterPso == nil
+        || mb->acRepulsePso == nil || mb->acBuildAdjPso == nil || mb->acLapDegPso == nil)
+        return -413;
+
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+    const NSUInteger np = static_cast<NSUInteger>(particleCount);
+    const NSUInteger pbytes = np * sizeof(float);
+    const NSUInteger cbytes = static_cast<NSUInteger>(nCells) * sizeof(int);
+    const NSUInteger m9bytes = np * 9u * sizeof(float);
+    const NSUInteger sortBytes = np * sizeof(int);
+    const NSUInteger adjBytes = np * static_cast<NSUInteger>(kAnisoDegMax) * sizeof(int);
+    const NSUInteger degBytes = np * sizeof(int);
+
+    std::vector<int> hist(static_cast<size_t>(nCells));
+    std::vector<int> cellStart(static_cast<size_t>(nCells));
+    std::vector<int> cellPop(static_cast<size_t>(nCells));
+
+    id<MTLBuffer> bPosA0 = [mb->device newBufferWithLength:pbytes options:opts];
+    id<MTLBuffer> bPosA1 = [mb->device newBufferWithLength:pbytes options:opts];
+    id<MTLBuffer> bPosA2 = [mb->device newBufferWithLength:pbytes options:opts];
+    id<MTLBuffer> bPosB0 = [mb->device newBufferWithLength:pbytes options:opts];
+    id<MTLBuffer> bPosB1 = [mb->device newBufferWithLength:pbytes options:opts];
+    id<MTLBuffer> bPosB2 = [mb->device newBufferWithLength:pbytes options:opts];
+    id<MTLBuffer> bMet = [mb->device newBufferWithBytes:metric9 length:m9bytes options:opts];
+    id<MTLBuffer> bFix = [mb->device newBufferWithBytes:fixedMask length:np * sizeof(unsigned char) options:opts];
+    id<MTLBuffer> bHist = [mb->device newBufferWithLength:cbytes options:opts];
+    id<MTLBuffer> bHead = [mb->device newBufferWithLength:cbytes options:opts];
+    id<MTLBuffer> bCellStart = [mb->device newBufferWithLength:cbytes options:opts];
+    id<MTLBuffer> bCellPop = [mb->device newBufferWithLength:cbytes options:opts];
+    id<MTLBuffer> bSort = [mb->device newBufferWithLength:sortBytes options:opts];
+    id<MTLBuffer> bAdj = [mb->device newBufferWithLength:adjBytes options:opts];
+    id<MTLBuffer> bDeg = [mb->device newBufferWithLength:degBytes options:opts];
+    id<MTLBuffer> bNp = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    id<MTLBuffer> bNc = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    id<MTLBuffer> bDegMax = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    id<MTLBuffer> bLapStr = [mb->device newBufferWithLength:sizeof(float) options:opts];
+    if (bPosA0 == nil || bPosA1 == nil || bPosA2 == nil || bPosB0 == nil || bPosB1 == nil || bPosB2 == nil || bMet == nil
+        || bFix == nil || bHist == nil || bHead == nil || bCellStart == nil || bCellPop == nil || bSort == nil || bAdj == nil
+        || bDeg == nil || bNp == nil || bNc == nil || bDegMax == nil || bLapStr == nil)
+        return -414;
+
+    memcpy([bPosA0 contents], posX, pbytes);
+    memcpy([bPosA1 contents], posY, pbytes);
+    memcpy([bPosA2 contents], posZ, pbytes);
+    *static_cast<int*>([bNp contents]) = particleCount;
+    *static_cast<int*>([bNc contents]) = nCells;
+    *static_cast<int*>([bDegMax contents]) = kAnisoDegMax;
+    *static_cast<float*>([bLapStr contents]) = lapStrength;
+
+    const float eps = 1e-8f;
+    const float neighR = targetSpacing * 2.0f;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd1 = [mb->queue commandBuffer];
+        if (cmd1 == nil)
+            return -415;
+        id<MTLComputeCommandEncoder> e1 = [cmd1 computeCommandEncoder];
+        if (e1 == nil)
+            return -416;
+        [e1 setComputePipelineState:mb->acClearAtomicPso];
+        [e1 setBuffer:bHist offset:0 atIndex:0];
+        [e1 setBuffer:bNc offset:0 atIndex:1];
+        MbDispatch1D(e1, mb->acClearAtomicPso, static_cast<NSUInteger>(nCells));
+        [e1 memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        [e1 setComputePipelineState:mb->acCountCellsPso];
+        [e1 setBuffer:bPosA0 offset:0 atIndex:0];
+        [e1 setBuffer:bPosA1 offset:0 atIndex:1];
+        [e1 setBuffer:bPosA2 offset:0 atIndex:2];
+        [e1 setBuffer:bHist offset:0 atIndex:3];
+        [e1 setBuffer:bNp offset:0 atIndex:4];
+        [e1 setBytes:&bbMinX length:sizeof(float) atIndex:5];
+        [e1 setBytes:&bbMinY length:sizeof(float) atIndex:6];
+        [e1 setBytes:&bbMinZ length:sizeof(float) atIndex:7];
+        [e1 setBytes:&invCell length:sizeof(float) atIndex:8];
+        [e1 setBytes:&dimX length:sizeof(int) atIndex:9];
+        [e1 setBytes:&dimY length:sizeof(int) atIndex:10];
+        [e1 setBytes:&dimZ length:sizeof(int) atIndex:11];
+        MbDispatch1D(e1, mb->acCountCellsPso, np);
+        [e1 endEncoding];
+        [cmd1 commit];
+        [cmd1 waitUntilCompleted];
+    }
+
+    memcpy(hist.data(), [bHist contents], cbytes);
+    int acc = 0;
+    for (int i = 0; i < nCells; i++) {
+        cellStart[static_cast<size_t>(i)] = acc;
+        cellPop[static_cast<size_t>(i)] = hist[static_cast<size_t>(i)];
+        acc += hist[static_cast<size_t>(i)];
+    }
+    if (acc != particleCount)
+        return -417;
+
+    memcpy([bCellStart contents], cellStart.data(), cbytes);
+    memcpy([bCellPop contents], cellPop.data(), cbytes);
+    memcpy([bHead contents], cellStart.data(), cbytes);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd2 = [mb->queue commandBuffer];
+        if (cmd2 == nil)
+            return -418;
+        id<MTLComputeCommandEncoder> e2 = [cmd2 computeCommandEncoder];
+        if (e2 == nil)
+            return -419;
+        [e2 setComputePipelineState:mb->acScatterPso];
+        [e2 setBuffer:bPosA0 offset:0 atIndex:0];
+        [e2 setBuffer:bPosA1 offset:0 atIndex:1];
+        [e2 setBuffer:bPosA2 offset:0 atIndex:2];
+        [e2 setBuffer:bHead offset:0 atIndex:3];
+        [e2 setBuffer:bSort offset:0 atIndex:4];
+        [e2 setBuffer:bNp offset:0 atIndex:5];
+        [e2 setBytes:&bbMinX length:sizeof(float) atIndex:6];
+        [e2 setBytes:&bbMinY length:sizeof(float) atIndex:7];
+        [e2 setBytes:&bbMinZ length:sizeof(float) atIndex:8];
+        [e2 setBytes:&invCell length:sizeof(float) atIndex:9];
+        [e2 setBytes:&dimX length:sizeof(int) atIndex:10];
+        [e2 setBytes:&dimY length:sizeof(int) atIndex:11];
+        [e2 setBytes:&dimZ length:sizeof(int) atIndex:12];
+        MbDispatch1D(e2, mb->acScatterPso, np);
+        [e2 memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        [e2 setComputePipelineState:mb->acRepulsePso];
+        [e2 setBuffer:bPosA0 offset:0 atIndex:0];
+        [e2 setBuffer:bPosA1 offset:0 atIndex:1];
+        [e2 setBuffer:bPosA2 offset:0 atIndex:2];
+        [e2 setBuffer:bPosB0 offset:0 atIndex:3];
+        [e2 setBuffer:bPosB1 offset:0 atIndex:4];
+        [e2 setBuffer:bPosB2 offset:0 atIndex:5];
+        [e2 setBuffer:bMet offset:0 atIndex:6];
+        [e2 setBuffer:bFix offset:0 atIndex:7];
+        [e2 setBuffer:bCellStart offset:0 atIndex:8];
+        [e2 setBuffer:bCellPop offset:0 atIndex:9];
+        [e2 setBuffer:bSort offset:0 atIndex:10];
+        [e2 setBuffer:bNp offset:0 atIndex:11];
+        [e2 setBytes:&bbMinX length:sizeof(float) atIndex:12];
+        [e2 setBytes:&bbMinY length:sizeof(float) atIndex:13];
+        [e2 setBytes:&bbMinZ length:sizeof(float) atIndex:14];
+        [e2 setBytes:&invCell length:sizeof(float) atIndex:15];
+        [e2 setBytes:&dimX length:sizeof(int) atIndex:16];
+        [e2 setBytes:&dimY length:sizeof(int) atIndex:17];
+        [e2 setBytes:&dimZ length:sizeof(int) atIndex:18];
+        [e2 setBytes:&targetSpacing length:sizeof(float) atIndex:19];
+        [e2 setBytes:&repulsionStrength length:sizeof(float) atIndex:20];
+        [e2 setBytes:&eps length:sizeof(float) atIndex:21];
+        MbDispatch1D(e2, mb->acRepulsePso, np);
+        [e2 memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        [e2 setComputePipelineState:mb->acBuildAdjPso];
+        [e2 setBuffer:bPosB0 offset:0 atIndex:0];
+        [e2 setBuffer:bPosB1 offset:0 atIndex:1];
+        [e2 setBuffer:bPosB2 offset:0 atIndex:2];
+        [e2 setBuffer:bAdj offset:0 atIndex:3];
+        [e2 setBuffer:bDeg offset:0 atIndex:4];
+        [e2 setBuffer:bCellStart offset:0 atIndex:5];
+        [e2 setBuffer:bCellPop offset:0 atIndex:6];
+        [e2 setBuffer:bSort offset:0 atIndex:7];
+        [e2 setBuffer:bNp offset:0 atIndex:8];
+        [e2 setBytes:&bbMinX length:sizeof(float) atIndex:9];
+        [e2 setBytes:&bbMinY length:sizeof(float) atIndex:10];
+        [e2 setBytes:&bbMinZ length:sizeof(float) atIndex:11];
+        [e2 setBytes:&invCell length:sizeof(float) atIndex:12];
+        [e2 setBytes:&dimX length:sizeof(int) atIndex:13];
+        [e2 setBytes:&dimY length:sizeof(int) atIndex:14];
+        [e2 setBytes:&dimZ length:sizeof(int) atIndex:15];
+        [e2 setBytes:&neighR length:sizeof(float) atIndex:16];
+        [e2 setBuffer:bDegMax offset:0 atIndex:17];
+        MbDispatch1D(e2, mb->acBuildAdjPso, np);
+        [e2 memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        [e2 setComputePipelineState:mb->acLapDegPso];
+        [e2 setBuffer:bPosB0 offset:0 atIndex:0];
+        [e2 setBuffer:bPosB1 offset:0 atIndex:1];
+        [e2 setBuffer:bPosB2 offset:0 atIndex:2];
+        [e2 setBuffer:bPosA0 offset:0 atIndex:3];
+        [e2 setBuffer:bPosA1 offset:0 atIndex:4];
+        [e2 setBuffer:bPosA2 offset:0 atIndex:5];
+        [e2 setBuffer:bAdj offset:0 atIndex:6];
+        [e2 setBuffer:bDeg offset:0 atIndex:7];
+        [e2 setBuffer:bNp offset:0 atIndex:8];
+        [e2 setBuffer:bLapStr offset:0 atIndex:9];
+        [e2 setBuffer:bDegMax offset:0 atIndex:10];
+        [e2 setBuffer:bFix offset:0 atIndex:11];
+        MbDispatch1D(e2, mb->acLapDegPso, np);
+        [e2 endEncoding];
+        [cmd2 commit];
+        [cmd2 waitUntilCompleted];
+    }
+
+    memcpy(posX, [bPosA0 contents], pbytes);
+    memcpy(posY, [bPosA1 contents], pbytes);
+    memcpy(posZ, [bPosA2 contents], pbytes);
+    return 0;
+}
+
+int mb_aniso_cvt_project_boundary_segments(
+    void* ctx,
+    float* posX,
+    float* posY,
+    float* posZ,
+    const unsigned char* boundaryParticle,
+    int particleCount,
+    const float* segAx,
+    const float* segAy,
+    const float* segAz,
+    const float* segBx,
+    const float* segBy,
+    const float* segBz,
+    int nSeg)
+{
+    if (ctx == nullptr || particleCount <= 0 || nSeg <= 0 || posX == nullptr || posY == nullptr || posZ == nullptr
+        || boundaryParticle == nullptr || segAx == nullptr || segAy == nullptr || segAz == nullptr || segBx == nullptr
+        || segBy == nullptr || segBz == nullptr)
+        return -420;
+
+    auto* mb = static_cast<MBContext*>(ctx);
+    if (mb->queue == nil || mb->acBoundarySegPso == nil)
+        return -421;
+
+    MTLResourceOptions opts = MTLResourceStorageModeShared;
+    const NSUInteger np = static_cast<NSUInteger>(particleCount);
+    const NSUInteger pbytes = np * sizeof(float);
+    const NSUInteger sbytes = static_cast<NSUInteger>(nSeg) * sizeof(float);
+
+    id<MTLBuffer> b0 = [mb->device newBufferWithBytes:posX length:pbytes options:opts];
+    id<MTLBuffer> b1 = [mb->device newBufferWithBytes:posY length:pbytes options:opts];
+    id<MTLBuffer> b2 = [mb->device newBufferWithBytes:posZ length:pbytes options:opts];
+    id<MTLBuffer> bB = [mb->device newBufferWithBytes:boundaryParticle length:np * sizeof(unsigned char) options:opts];
+    id<MTLBuffer> sax = [mb->device newBufferWithBytes:segAx length:sbytes options:opts];
+    id<MTLBuffer> say = [mb->device newBufferWithBytes:segAy length:sbytes options:opts];
+    id<MTLBuffer> saz = [mb->device newBufferWithBytes:segAz length:sbytes options:opts];
+    id<MTLBuffer> sbx = [mb->device newBufferWithBytes:segBx length:sbytes options:opts];
+    id<MTLBuffer> sby = [mb->device newBufferWithBytes:segBy length:sbytes options:opts];
+    id<MTLBuffer> sbz = [mb->device newBufferWithBytes:segBz length:sbytes options:opts];
+    id<MTLBuffer> bNp = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    id<MTLBuffer> bNs = [mb->device newBufferWithLength:sizeof(int) options:opts];
+    if (b0 == nil || b1 == nil || b2 == nil || bB == nil || sax == nil || say == nil || saz == nil || sbx == nil || sby == nil
+        || sbz == nil || bNp == nil || bNs == nil)
+        return -422;
+    *static_cast<int*>([bNp contents]) = particleCount;
+    *static_cast<int*>([bNs contents]) = nSeg;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = [mb->queue commandBuffer];
+        if (cmd == nil)
+            return -423;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (enc == nil)
+            return -424;
+        [enc setComputePipelineState:mb->acBoundarySegPso];
+        [enc setBuffer:b0 offset:0 atIndex:0];
+        [enc setBuffer:b1 offset:0 atIndex:1];
+        [enc setBuffer:b2 offset:0 atIndex:2];
+        [enc setBuffer:bB offset:0 atIndex:3];
+        [enc setBuffer:sax offset:0 atIndex:4];
+        [enc setBuffer:say offset:0 atIndex:5];
+        [enc setBuffer:saz offset:0 atIndex:6];
+        [enc setBuffer:sbx offset:0 atIndex:7];
+        [enc setBuffer:sby offset:0 atIndex:8];
+        [enc setBuffer:sbz offset:0 atIndex:9];
+        [enc setBuffer:bNp offset:0 atIndex:10];
+        [enc setBuffer:bNs offset:0 atIndex:11];
+        MbDispatch1D(enc, mb->acBoundarySegPso, np);
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+    memcpy(posX, [b0 contents], pbytes);
+    memcpy(posY, [b1 contents], pbytes);
+    memcpy(posZ, [b2 contents], pbytes);
+    return 0;
+}
+
+int mb_spectral_df_bfs(
+    void* ctx,
+    const unsigned char* solid,
+    float* phi,
+    int nx,
+    int ny,
+    int nz,
+    float voxelSize)
+{
+    (void)ctx;
+    if (solid == nullptr || phi == nullptr || nx < 1 || ny < 1 || nz < 1)
+        return -1;
+    const int n = nx * ny * nz;
+    std::vector<int> dist(static_cast<size_t>(n), INT_MAX / 4);
+    std::queue<int> q;
+    for (int z = 0; z < nz; ++z)
+        for (int y = 0; y < ny; ++y)
+            for (int x = 0; x < nx; ++x)
+            {
+                const int idx = x + y * nx + z * nx * ny;
+                if (solid[static_cast<size_t>(idx)] != 0)
+                {
+                    dist[static_cast<size_t>(idx)] = 0;
+                    q.push(idx);
+                }
+            }
+
+    const int dx[6] = {1, -1, 0, 0, 0, 0};
+    const int dy[6] = {0, 0, 1, -1, 0, 0};
+    const int dz[6] = {0, 0, 0, 0, 1, -1};
+    while (!q.empty())
+    {
+        const int cur = q.front();
+        q.pop();
+        const int cz = cur / (nx * ny);
+        const int rem = cur - cz * nx * ny;
+        const int cy = rem / nx;
+        const int cx = rem - cy * nx;
+        const int dv = dist[static_cast<size_t>(cur)];
+        for (int k = 0; k < 6; ++k)
+        {
+            const int nx2 = cx + dx[k];
+            const int ny2 = cy + dy[k];
+            const int nz2 = cz + dz[k];
+            if (nx2 < 0 || ny2 < 0 || nz2 < 0 || nx2 >= nx || ny2 >= ny || nz2 >= nz)
+                continue;
+            const int ni = nx2 + ny2 * nx + nz2 * nx * ny;
+            if (solid[static_cast<size_t>(ni)] != 0)
+                continue;
+            const int nd = dv + 1;
+            if (nd < dist[static_cast<size_t>(ni)])
+            {
+                dist[static_cast<size_t>(ni)] = nd;
+                q.push(ni);
+            }
+        }
+    }
+
+    for (int i = 0; i < n; ++i)
+    {
+        if (solid[static_cast<size_t>(i)] != 0)
+            phi[i] = 0.f;
+        else if (dist[static_cast<size_t>(i)] >= INT_MAX / 8)
+            phi[i] = 1e6f * voxelSize;
+        else
+            phi[i] = static_cast<float>(dist[static_cast<size_t>(i)]) * voxelSize;
+    }
+    return 0;
+}
+
+int mb_spectral_voxel_columns(
+    void* ctx,
+    const float* vx,
+    const float* vy,
+    const float* vz,
+    int vertexCount,
+    const int* tri,
+    int triCount,
+    float bbMinX,
+    float bbMinY,
+    float bbMinZ,
+    float dx,
+    float dy,
+    float dz,
+    int nx,
+    int ny,
+    int nz,
+    unsigned char* gridOut)
+{
+    (void)ctx;
+    (void)vx;
+    (void)vy;
+    (void)vz;
+    (void)vertexCount;
+    (void)tri;
+    (void)triCount;
+    (void)bbMinX;
+    (void)bbMinY;
+    (void)bbMinZ;
+    (void)dx;
+    (void)dy;
+    (void)dz;
+    (void)nx;
+    (void)ny;
+    (void)nz;
+    (void)gridOut;
+    return -1;
 }
 
 } // extern "C"

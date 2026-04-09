@@ -222,6 +222,110 @@ int mb_normalize_contrast_3d(
 
 int mb_zero_voxel_boundary(void* ctx, float* data, int nx, int ny, int nz);
 
+/// Gray–Scott reaction–diffusion on a 2D grid. @p a and @p b have length @c nx*ny in C# order: index @c ix*ny+iy.
+/// Overwritten with the final state after @p iterations steps (one GPU command buffer).
+int mb_gray_scott_2d(
+    void* ctx,
+    float* a,
+    float* b,
+    int nx,
+    int ny,
+    int iterations,
+    float dt,
+    float f,
+    float k,
+    float dA,
+    float dB);
+
+/// Discrete curvature-based 3×3 metric per topology vertex (9 floats each, row-major symmetric).
+int mb_aniso_cvt_compute_metric_topo(
+    void* ctx,
+    const float* px,
+    const float* py,
+    const float* pz,
+    const float* nx,
+    const float* ny,
+    const float* nz,
+    const int* adjFlat,
+    const float* cotW,
+    const int* rowOff,
+    const float* mixedArea,
+    const float* angleSum,
+    const unsigned char* isBoundary,
+    int nTopo,
+    float alpha,
+    float* outMetric9);
+
+/// One anisotropic CVT particle step: spatial hash, repulsion, deg-capped adjacency Laplacian, then (on host) caller runs closest mesh.
+/// @p dimX*dimY*dimZ is uniform grid cell count; @p cellSize is voxel edge length; @p invCell should be @c 1.f / cellSize.
+/// After return, @p posX/Y/Z hold post-Laplacian positions (not yet projected). Fixed particles skip repulsion/Laplacian moves.
+int mb_aniso_cvt_particle_gpu_pre_project(
+    void* ctx,
+    float* posX,
+    float* posY,
+    float* posZ,
+    const float* metric9,
+    const unsigned char* fixedMask,
+    int particleCount,
+    float bbMinX,
+    float bbMinY,
+    float bbMinZ,
+    int dimX,
+    int dimY,
+    int dimZ,
+    float cellSize,
+    float invCell,
+    float targetSpacing,
+    float repulsionStrength,
+    float lapStrength);
+
+/// Projects particle positions onto boundary segments (naked mesh edges). @p boundaryParticle[i] non-zero selects particle @p i.
+int mb_aniso_cvt_project_boundary_segments(
+    void* ctx,
+    float* posX,
+    float* posY,
+    float* posZ,
+    const unsigned char* boundaryParticle,
+    int particleCount,
+    const float* segAx,
+    const float* segAy,
+    const float* segAz,
+    const float* segBx,
+    const float* segBy,
+    const float* segBz,
+    int nSeg);
+
+/// Multi-source BFS distance field in empty voxels (6-neighbor); solid voxels get phi=0.
+/// @return 0 on success.
+int mb_spectral_df_bfs(
+    void* ctx,
+    const unsigned char* solid,
+    float* phi,
+    int nx,
+    int ny,
+    int nz,
+    float voxelSize);
+
+/// Column-based mesh voxelization (optional GPU path). @return 0 on success, negative if unavailable.
+int mb_spectral_voxel_columns(
+    void* ctx,
+    const float* vx,
+    const float* vy,
+    const float* vz,
+    int vertexCount,
+    const int* tri,
+    int triCount,
+    float bbMinX,
+    float bbMinY,
+    float bbMinZ,
+    float dx,
+    float dy,
+    float dz,
+    int nx,
+    int ny,
+    int nz,
+    unsigned char* gridOut);
+
 #ifdef __cplusplus
 }
 #endif

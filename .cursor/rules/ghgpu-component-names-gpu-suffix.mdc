@@ -7,7 +7,7 @@ alwaysApply: true
 
 When **adding or renaming** `GH_Component` classes in this repo (`GHGPUPlugin/Components/**`):
 
-- The Grasshopper **display name** (first argument to `GH_Component`’s base constructor) **must end with ` GPU`** (space before GPU), e.g. `Shortest Route Mesh GPU`, `Laplacian Smooth GPU`.
+- The Grasshopper **display name** (first argument to `GH_Component`’s base constructor) **must end with ` GPU`** (space before GPU), e.g. `Shortest Route Mesh GPU`, `QuickSmooth GPU`.
 - Keep names readable; put the domain first (`… Mesh GPU`, `… Curve GPU`, `… 2D GPU`), then the **` GPU`** suffix.
 - **Nicknames** should stay short and unique (they need not literally end in `GPU`, but may include it, e.g. `RouteMeshGPU`).
 

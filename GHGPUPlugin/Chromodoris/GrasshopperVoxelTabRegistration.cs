@@ -11,7 +11,9 @@ internal static class GrasshopperVoxelTabRegistration
 {
     internal static readonly Type[] ComponentTypes =
     {
+#if DEBUG
         typeof(VoxelSimpAutoComponent),
+#endif
         typeof(VoxelSimpTopologyComponent),
         typeof(VoxelDensitySliceComponent),
         typeof(VoxelDensitySmoothComponent),

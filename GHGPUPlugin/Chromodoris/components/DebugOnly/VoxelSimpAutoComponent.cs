@@ -185,12 +185,12 @@ public class VoxelSimpAutoComponent : GH_Component
         pcgIterations = Math.Min(pcgIterations, 1500);
 
         const int outerIterations = 45;
-        const double moveLimit = 0.2;
+        const double moveLimit = 0.15;
         const double voidStiffness = 1e-6;
         const double poisson = 0.3;
         const double youngModulus = 1.0;
         const int maxElements = 80000;
-        double filterRadius = Math.Max(2.0, 2.0 * solveStride);
+        double filterRadius = Math.Max(1.2, 1.5 * solveStride);
         const double simpPenaltyNominal = 3.0;
 
         string autoParams =
@@ -211,7 +211,7 @@ public class VoxelSimpAutoComponent : GH_Component
                 box, loadPts, loadVecs, youngModulus, supPts, supDirs,
                 vf,
                 outerIterations, pcgIterations, simpPenaltyNominal, moveLimit, voidStiffness, poisson, maxElements, solveStride,
-                useGpu, recordHistory: false, filterRadius, penaltyContinuation: true, enforceConnectivity: true);
+                useGpu, recordHistory: false, filterRadius, penaltyContinuation: true);
         }
         catch (Exception ex)
         {

@@ -233,4 +233,105 @@ public static class MetalBridge
         int nx,
         int ny,
         int nz);
+
+    /// <summary>Gray–Scott 2D: runs <paramref name="iterations"/> steps in one Metal command buffer; overwrites <paramref name="a"/> and <paramref name="b"/> (length <c>nx*ny</c>, index <c>ix*ny+iy</c>).</summary>
+    [DllImport(LibName, EntryPoint = "mb_gray_scott_2d", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int GrayScott2D(
+        IntPtr ctx,
+        [In, Out] float[] a,
+        [In, Out] float[] b,
+        int nx,
+        int ny,
+        int iterations,
+        float dt,
+        float f,
+        float k,
+        float dA,
+        float dB);
+
+    [DllImport(LibName, EntryPoint = "mb_aniso_cvt_compute_metric_topo", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int AnisoCvtComputeMetricTopo(
+        IntPtr ctx,
+        [In] float[] px,
+        [In] float[] py,
+        [In] float[] pz,
+        [In] float[] nx,
+        [In] float[] ny,
+        [In] float[] nz,
+        [In] int[] adjFlat,
+        [In] float[] cotW,
+        [In] int[] rowOff,
+        [In] float[] mixedArea,
+        [In] float[] angleSum,
+        [In] byte[] isBoundary,
+        int nTopo,
+        float alpha,
+        [Out] float[] outMetric9);
+
+    [DllImport(LibName, EntryPoint = "mb_aniso_cvt_particle_gpu_pre_project", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int AnisoCvtParticleGpuPreProject(
+        IntPtr ctx,
+        [In, Out] float[] posX,
+        [In, Out] float[] posY,
+        [In, Out] float[] posZ,
+        [In] float[] metric9,
+        [In] byte[] fixedMask,
+        int particleCount,
+        float bbMinX,
+        float bbMinY,
+        float bbMinZ,
+        int dimX,
+        int dimY,
+        int dimZ,
+        float cellSize,
+        float invCell,
+        float targetSpacing,
+        float repulsionStrength,
+        float lapStrength);
+
+    [DllImport(LibName, EntryPoint = "mb_aniso_cvt_project_boundary_segments", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int AnisoCvtProjectBoundarySegments(
+        IntPtr ctx,
+        [In, Out] float[] posX,
+        [In, Out] float[] posY,
+        [In, Out] float[] posZ,
+        [In] byte[] boundaryParticle,
+        int particleCount,
+        [In] float[] segAx,
+        [In] float[] segAy,
+        [In] float[] segAz,
+        [In] float[] segBx,
+        [In] float[] segBy,
+        [In] float[] segBz,
+        int nSeg);
+
+    [DllImport(LibName, EntryPoint = "mb_spectral_df_bfs", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SpectralDfBfs(
+        IntPtr ctx,
+        [In] byte[] solid,
+        [In, Out] float[] phi,
+        int nx,
+        int ny,
+        int nz,
+        float voxelSize);
+
+    [DllImport(LibName, EntryPoint = "mb_spectral_voxel_columns", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SpectralVoxelColumns(
+        IntPtr ctx,
+        [In] float[] vx,
+        [In] float[] vy,
+        [In] float[] vz,
+        int vertexCount,
+        [In] int[] tri,
+        int triCount,
+        float bbMinX,
+        float bbMinY,
+        float bbMinZ,
+        float dx,
+        float dy,
+        float dz,
+        int nx,
+        int ny,
+        int nz,
+        [Out] byte[] gridOut);
 }

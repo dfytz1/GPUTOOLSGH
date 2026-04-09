@@ -54,8 +54,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
             bool useGpuMatVec = true,
             bool recordHistory = false,
             double filterRadius = 1.5,
-            bool penaltyContinuation = false,
-            bool enforceConnectivity = true)
+            bool penaltyContinuation = false)
         {
             int nx = insideFine.GetLength(0);
             int ny = insideFine.GetLength(1);
@@ -262,15 +261,6 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             double volTarget = volumeFraction * nDesign;
 
-            var isSupportEl = new bool[nElem];
-            var isLoadEl = new bool[nElem];
-            for (int e = 0; e < nElem; e++)
-            {
-                int ci = ex[e], cj = ey[e], ck = ez[e];
-                isSupportEl[e] = support[ci, cj, ck] >= 0.5f;
-                isLoadEl[e] = load[ci, cj, ck] >= 0.5f;
-            }
-
             var keCache = new Dictionary<(int, int, int), double[,]>();
             double[][,] K0e = new double[nElem][,];
             for (int e = 0; e < nElem; e++)
@@ -306,8 +296,10 @@ namespace GHGPUPlugin.Chromodoris.Topology
             var Ap = new double[ndof];
             var diag = new double[ndof];
 
+            for (int e = 0; e < nElem; e++)
+                x[e] = passive[e] ? 1.0 : volumeFraction;
+
             double eminClamped = Math.Max(1e-9, Math.Min(emin, 0.5));
-            InitPathBiasedDensity(x, nElem, ex, ey, ez, isLoadEl, isSupportEl, passive, volumeFraction, eminClamped);
 
             IntPtr gpuCtx = IntPtr.Zero;
             bool useGpu = false;
@@ -396,29 +388,20 @@ namespace GHGPUPlugin.Chromodoris.Topology
 
             var rhoCoarse = new float[nxc, nyc, nzc];
             double lastPenaltyUsed = simpP;
-            double lastMoveUsed = moveLimit;
-
-            var pathProtected = new bool[nElem];
-            var pathProtectRemaining = new int[nElem];
 
             for (int outer = 0; outer < maxOuterIter; outer++)
             {
-                int outerIter = outer + 1;
                 double pUse = simpP;
                 if (penaltyContinuation)
                 {
-                    pUse = 1.0 + (3.0 - 1.0) * Math.Min(1.0, Math.Max(0.0, (outerIter - 15) / 25.0));
+                    int outerIter = outer + 1;
+                    pUse = 1.0 + (3.0 - 1.0) * Math.Min(1.0, (outerIter - 5) / 20.0);
                     if (pUse < 1.0) pUse = 1.0;
                     if (pUse > 3.0) pUse = 3.0;
                 }
 
                 pRuntime[0] = pUse;
                 lastPenaltyUsed = pUse;
-
-                double moveIter = moveLimit;
-                if (penaltyContinuation)
-                    moveIter = outerIter < 20 ? 0.1 : 0.2;
-                lastMoveUsed = moveIter;
 
                 BuildDiagonal(nElem, dofMap, fixedDof, K0e, x, passive, eminClamped, pUse, diag);
 
@@ -540,29 +523,13 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 if (recordHistory && res.DensityHistory != null)
                     res.DensityHistory.Add((float[,,])res.DensityPhys.Clone());
 
-                OcUpdate(nElem, x, dc, passive, volTarget, moveIter, 0.001, xNew, pathProtected);
+                OcUpdate(nElem, x, dc, passive, volTarget, moveLimit, 0.001, xNew);
 
                 double change = 0;
                 for (int e = 0; e < nElem; e++)
                 {
                     change = Math.Max(change, Math.Abs(xNew[e] - x[e]));
                     x[e] = xNew[e];
-                }
-
-                bool restoredPath = false;
-                if (enforceConnectivity && outer > 2)
-                    restoredPath = EnforceConnectivity(x, ex, ey, ez, nElem, isSupportEl, isLoadEl, pathProtected, pathProtectRemaining);
-
-                if (!restoredPath)
-                {
-                    for (int e = 0; e < nElem; e++)
-                    {
-                        if (pathProtectRemaining[e] <= 0)
-                            continue;
-                        pathProtectRemaining[e]--;
-                        if (pathProtectRemaining[e] == 0)
-                            pathProtected[e] = false;
-                    }
                 }
 
                 res.IterationsUsed = outer + 1;
@@ -576,7 +543,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 $"Iters={res.IterationsUsed} | Compliance={res.Compliance:G4} | " +
                 $"GPU_PCG={res.GpuPcgUsed} | FallbackCode={res.PcgFallbackCode} | " +
                 $"nElem={nElem} | nDof={ndof} | vf={volumeFraction:G3} | " +
-                $"simpP={(penaltyContinuation ? "continuation→" : "")}{lastPenaltyUsed:G3} | move={lastMoveUsed:G3} | emin={emin:G3}";
+                $"simpP={(penaltyContinuation ? "continuation→" : "")}{lastPenaltyUsed:G3} | move={moveLimit:G3} | emin={emin:G3}";
 
             res.Message = gpuFallbackMsg ?? "OK";
             return res;
@@ -925,255 +892,6 @@ namespace GHGPUPlugin.Chromodoris.Topology
         }
 
         /// <summary>
-        /// If support–load connectivity through elements with rho above 0.05 fails, boost density along a minimum-cost path (prefers existing material).
-        /// Restored path elements get pathProtected and 3 outer iterations of OC floor (remaining=3; decay skipped the iteration a path is restored).
-        /// </summary>
-        /// <returns>True if a minimum-cost path was boosted and marked protected.</returns>
-        private static bool EnforceConnectivity(
-            double[] rho,
-            int[] ex, int[] ey, int[] ez,
-            int nElem,
-            bool[] isSupport,
-            bool[] isLoad,
-            bool[] pathProtected,
-            int[] pathProtectRemaining,
-            double restoreRho = 0.9)
-        {
-            if (nElem == 0)
-                return false;
-
-            var cellToElem = new Dictionary<(int, int, int), int>(nElem);
-            for (int e = 0; e < nElem; e++)
-                cellToElem[(ex[e], ey[e], ez[e])] = e;
-
-            var visited = new bool[nElem];
-            var q = new Queue<int>();
-            for (int e = 0; e < nElem; e++)
-            {
-                if (!isSupport[e]) continue;
-                visited[e] = true;
-                q.Enqueue(e);
-            }
-
-            while (q.Count > 0)
-            {
-                int u = q.Dequeue();
-                for (int di = -1; di <= 1; di++)
-                {
-                    for (int dj = -1; dj <= 1; dj++)
-                    {
-                        for (int dk = -1; dk <= 1; dk++)
-                        {
-                            if (di == 0 && dj == 0 && dk == 0) continue;
-                            if (!cellToElem.TryGetValue((ex[u] + di, ey[u] + dj, ez[u] + dk), out int v))
-                                continue;
-                            if (visited[v] || rho[v] <= 0.05)
-                                continue;
-                            visited[v] = true;
-                            q.Enqueue(v);
-                        }
-                    }
-                }
-            }
-
-            for (int e = 0; e < nElem; e++)
-            {
-                if (isLoad[e] && visited[e])
-                    return false;
-            }
-
-            var dist = new double[nElem];
-            var parent = new int[nElem];
-            for (int i = 0; i < nElem; i++)
-            {
-                dist[i] = double.PositiveInfinity;
-                parent[i] = -1;
-            }
-
-            var pq = new PriorityQueue<int, double>();
-            for (int e = 0; e < nElem; e++)
-            {
-                if (!isSupport[e]) continue;
-                dist[e] = 0;
-                pq.Enqueue(e, 0);
-            }
-
-            while (pq.Count > 0)
-            {
-                pq.TryDequeue(out int u, out double du);
-                if (du > dist[u] + 1e-12)
-                    continue;
-
-                for (int di = -1; di <= 1; di++)
-                {
-                    for (int dj = -1; dj <= 1; dj++)
-                    {
-                        for (int dk = -1; dk <= 1; dk++)
-                        {
-                            if (di == 0 && dj == 0 && dk == 0) continue;
-                            if (!cellToElem.TryGetValue((ex[u] + di, ey[u] + dj, ez[u] + dk), out int v))
-                                continue;
-                            double w = 1.0 - rho[v];
-                            if (w < 0) w = 0;
-                            double nd = du + w;
-                            if (nd < dist[v])
-                            {
-                                dist[v] = nd;
-                                parent[v] = u;
-                                pq.Enqueue(v, nd);
-                            }
-                        }
-                    }
-                }
-            }
-
-            int bestL = -1;
-            double bestD = double.PositiveInfinity;
-            for (int e = 0; e < nElem; e++)
-            {
-                if (!isLoad[e] || double.IsInfinity(dist[e])) continue;
-                if (dist[e] < bestD)
-                {
-                    bestD = dist[e];
-                    bestL = e;
-                }
-            }
-
-            if (bestL < 0)
-                return false;
-
-            int cur = bestL;
-            while (cur >= 0)
-            {
-                if (rho[cur] < restoreRho)
-                    rho[cur] = restoreRho;
-                pathProtected[cur] = true;
-                pathProtectRemaining[cur] = 3;
-                if (isSupport[cur])
-                    break;
-                cur = parent[cur];
-            }
-
-            return true;
-        }
-
-        /// <summary>
-        /// 6-neighbor BFS distances on the coarse element graph; seeds with dist 0; unreachable → large finite.
-        /// </summary>
-        private static void GeodesicDistanceToMarkers(
-            int nElem, int[] ex, int[] ey, int[] ez,
-            Dictionary<(int, int, int), int> cellToElem,
-            bool[] isMarker,
-            double[] dist,
-            double unreachableReplace)
-        {
-            for (int i = 0; i < nElem; i++)
-                dist[i] = double.PositiveInfinity;
-
-            var q = new Queue<int>();
-            for (int e = 0; e < nElem; e++)
-            {
-                if (!isMarker[e]) continue;
-                dist[e] = 0;
-                q.Enqueue(e);
-            }
-
-            if (q.Count == 0)
-            {
-                for (int i = 0; i < nElem; i++)
-                    dist[i] = 0;
-                return;
-            }
-
-            while (q.Count > 0)
-            {
-                int u = q.Dequeue();
-                double du = dist[u];
-                int ci = ex[u], cj = ey[u], ck = ez[u];
-                void Relax(int ni, int nj, int nk)
-                {
-                    if (!cellToElem.TryGetValue((ni, nj, nk), out int v))
-                        return;
-                    double nd = du + 1.0;
-                    if (nd < dist[v])
-                    {
-                        dist[v] = nd;
-                        q.Enqueue(v);
-                    }
-                }
-
-                Relax(ci + 1, cj, ck);
-                Relax(ci - 1, cj, ck);
-                Relax(ci, cj + 1, ck);
-                Relax(ci, cj - 1, ck);
-                Relax(ci, cj, ck + 1);
-                Relax(ci, cj, ck - 1);
-            }
-
-            for (int i = 0; i < nElem; i++)
-            {
-                if (double.IsInfinity(dist[i]))
-                    dist[i] = unreachableReplace;
-            }
-        }
-
-        /// <summary>
-        /// Bias initial design density toward the load–support corridor: scale raw path bias so its mean over all coarse elements equals vf, then clamp design cells to [emin, 1]; passive load/support stay 1.
-        /// </summary>
-        private static void InitPathBiasedDensity(
-            double[] x,
-            int nElem,
-            int[] ex, int[] ey, int[] ez,
-            bool[] isLoadEl,
-            bool[] isSupportEl,
-            bool[] passive,
-            double volumeFraction,
-            double eminClamped)
-        {
-            if (nElem == 0)
-                return;
-
-            var cellToElem = new Dictionary<(int, int, int), int>(nElem);
-            for (int e = 0; e < nElem; e++)
-                cellToElem[(ex[e], ey[e], ez[e])] = e;
-
-            int mx = 0, my = 0, mz = 0;
-            for (int e = 0; e < nElem; e++)
-            {
-                mx = Math.Max(mx, ex[e]);
-                my = Math.Max(my, ey[e]);
-                mz = Math.Max(mz, ez[e]);
-            }
-            double unreachable = mx + my + mz + nElem + 10.0;
-
-            var dLoad = new double[nElem];
-            var dSup = new double[nElem];
-            GeodesicDistanceToMarkers(nElem, ex, ey, ez, cellToElem, isLoadEl, dLoad, unreachable);
-            GeodesicDistanceToMarkers(nElem, ex, ey, ez, cellToElem, isSupportEl, dSup, unreachable);
-
-            double sumBias = 0;
-            for (int e = 0; e < nElem; e++)
-                sumBias += 1.0 / (1.0 + dLoad[e] + dSup[e]);
-
-            double meanBias = sumBias / nElem;
-            double scale = volumeFraction / (meanBias + 1e-30);
-
-            for (int e = 0; e < nElem; e++)
-            {
-                if (passive[e])
-                {
-                    x[e] = 1.0;
-                    continue;
-                }
-
-                double pb = (1.0 / (1.0 + dLoad[e] + dSup[e])) * scale;
-                if (pb < eminClamped) pb = eminClamped;
-                if (pb > 1.0) pb = 1.0;
-                x[e] = pb;
-            }
-        }
-
-        /// <summary>
         /// SIMP sensitivity filter: weighted spherical average in element grid space (reduces checkerboarding).
         /// dc_filtered[i] = sum_j w_ij rho[j] dc[j] / sum_j w_ij rho[j], w_ij = max(0, radius - dist(i,j)).
         /// </summary>
@@ -1225,7 +943,7 @@ namespace GHGPUPlugin.Chromodoris.Topology
         }
 
         private static void OcUpdate(int nElem, double[] x, double[] dc, bool[] passive, double volTarget,
-            double move, double xmin, double[] xNew, bool[] pathProtected)
+            double move, double xmin, double[] xNew)
         {
             double l1 = 1e-12, l2 = 1e12;
             for (int bis = 0; bis < 80; bis++)
@@ -1258,14 +976,6 @@ namespace GHGPUPlugin.Chromodoris.Topology
                 double step = Math.Sqrt(Math.Max(1e-30, -dc[e] / (lmidF + 1e-30)));
                 double raw = x[e] * step;
                 xNew[e] = Math.Max(xmin, Math.Max(x[e] - move, Math.Min(1, Math.Min(x[e] + move, raw))));
-            }
-
-            const double pathProtectFloor = 0.7;
-            for (int e = 0; e < nElem; e++)
-            {
-                if (passive[e] || !pathProtected[e])
-                    continue;
-                xNew[e] = Math.Max(xNew[e], pathProtectFloor);
             }
         }
     }

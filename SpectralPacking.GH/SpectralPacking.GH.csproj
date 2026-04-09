@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SpectralPacking.GH</RootNamespace>
+    <AssemblyName>SpectralPacking.GH</AssemblyName>
+    <TargetExt>.gha</TargetExt>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Grasshopper" Version="8.*" />
+    <PackageReference Include="RhinoCommon" Version="8.*" />
+    <PackageReference Include="System.Drawing.Common" Version="7.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SpectralPacking.Core\SpectralPacking.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\MetalBridge\build\Release\MetalBridge.dylib" Link="MetalBridge.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\build\Release\MetalBridge.dylib')" />
+    <None Include="..\MetalBridge\Kernels\default.metallib" Link="default.metallib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\MetalBridge\Kernels\default.metallib')" />
+  </ItemGroup>
+  <Target Name="DeployToGrasshopperLibraries" AfterTargets="Build">
+    <PropertyGroup>
+      <_GrasshopperLibraries>$(HOME)/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries</_GrasshopperLibraries>
+    </PropertyGroup>
+    <ItemGroup>
+      <_GrasshopperDeploy Include="$(TargetPath)" />
+      <_GrasshopperDeploy Include="$(TargetDir)SpectralPacking.Core.dll" />
+      <_GrasshopperDeploy Include="$(TargetDir)MathNet.Numerics.dll" />
+      <_GrasshopperDeploy Include="$(TargetDir)MetalBridge.dylib" Condition="Exists('$(TargetDir)MetalBridge.dylib')" />
+      <_GrasshopperDeploy Include="$(TargetDir)default.metallib" Condition="Exists('$(TargetDir)default.metallib')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_GrasshopperDeploy)" DestinationFolder="$(_GrasshopperLibraries)" SkipUnchangedFiles="false" Condition="Exists('$(_GrasshopperLibraries)')" />
+    <Warning Text="Grasshopper Libraries folder not found; skipped copy to $(_GrasshopperLibraries)" Condition="!Exists('$(_GrasshopperLibraries)')" />
+  </Target>
+</Project>
