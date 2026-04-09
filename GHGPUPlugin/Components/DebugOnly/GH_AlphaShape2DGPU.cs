@@ -6,9 +6,9 @@ using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 
-namespace GHGPUPlugin.Components.DataRelationships;
+namespace GHGPUPlugin.Components.DebugOnly;
 
-/// <summary>2D alpha shape: Delaunay via GPU JFA edges + Triangle.NET constraints when enabled, else Bowyer–Watson; then circumradius filter on Metal (CPU fallback).</summary>
+/// <summary>2D alpha shape: Delaunay via GPU JFA edges + Triangle.NET when enabled, else Bowyer–Watson; circumradius filter on Metal (CPU fallback). Debug build only.</summary>
 public class GH_AlphaShape2DGPU : GH_Component
 {
     public GH_AlphaShape2DGPU()

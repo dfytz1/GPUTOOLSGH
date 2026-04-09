@@ -14,8 +14,12 @@ internal static class GrasshopperGpuToolsRegistration
         typeof(Components.Field.GH_Field2DPreviewMeshGPU),
         typeof(Components.DebugOnly.GH_AnisotropicCvtRemeshGPU),
         typeof(Components.DebugOnly.GH_MeshCollisionGPU),
+        typeof(Components.DebugOnly.GH_AlphaShape2DGPU),
     };
 #else
-    internal static readonly Type[] ComponentTypes = Array.Empty<Type>();
+    internal static readonly Type[] ComponentTypes =
+    {
+        typeof(Components.DataRelationships.GH_BoundaryMesh),
+    };
 #endif
 }

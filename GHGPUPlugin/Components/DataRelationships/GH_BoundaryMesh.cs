@@ -6,14 +6,14 @@ using Rhino.Geometry;
 
 namespace GHGPUPlugin.Components.DataRelationships;
 
-/// <summary>Planar constrained Delaunay triangulation (Triangle.NET): closed boundary and hole loops become hard edges; optional max triangle area refinement.</summary>
-public class GH_ConstrainedDelaunayPlanarGPU : GH_Component
+/// <summary>Planar constrained Delaunay triangulation (Triangle.NET, CPU): boundary and holes as hard edges.</summary>
+public class GH_BoundaryMesh : GH_Component
 {
-    public GH_ConstrainedDelaunayPlanarGPU()
+    public GH_BoundaryMesh()
         : base(
-            "Constrained Delaunay Planar GPU",
-            "CDtPlanGPU",
-            "Meshes a planar region from a closed boundary curve and optional closed hole curves. All polyline edges are preserved (constrained Delaunay). Set Max area greater than zero to subdivide with Triangle.NET quality refinement (Steiner points). Uses Unofficial.Triangle.NET.",
+            "Boundary Mesh",
+            "BndMesh",
+            "Meshes a planar region from a closed boundary curve and optional closed hole curves (floor-plan style). Edges are preserved (constrained Delaunay). Max area greater than zero enables Triangle.NET refinement (Steiner points). CPU only (Unofficial.Triangle.NET).",
             "GPUTools",
             "Mesh")
     {
@@ -23,7 +23,7 @@ public class GH_ConstrainedDelaunayPlanarGPU : GH_Component
     {
         pm.AddCurveParameter("Boundary", "B", "Closed outer boundary (planar).", GH_ParamAccess.item);
         pm.AddCurveParameter("Holes", "H", "Closed hole curves (planar). Empty list for no holes.", GH_ParamAccess.list);
-        pm.AddNumberParameter("MaxArea", "A", "Maximum triangle area for refinement; ≤0 skips refinement (CDT only, no Steiner points beyond Triangle defaults).", GH_ParamAccess.item, 0.0);
+        pm.AddNumberParameter("MaxArea", "A", "Maximum triangle area for refinement; zero or negative skips refinement (CDT only).", GH_ParamAccess.item, 0.0);
         pm.AddNumberParameter("MaxEdge", "E", "Target max spacing along curves when sampling polylines (model units).", GH_ParamAccess.item, 1.0);
         pm.AddPlaneParameter("Plane", "Pl", "Plane for projection; curve geometry is projected to this plane before meshing.", GH_ParamAccess.item, Plane.WorldXY);
     }
@@ -37,24 +37,24 @@ public class GH_ConstrainedDelaunayPlanarGPU : GH_Component
     protected override void SolveInstance(IGH_DataAccess DA)
     {
         Curve? boundary = null;
-        if (!DA.GetData("Boundary", ref boundary) || boundary == null)
+        if (!DA.GetData(0, ref boundary) || boundary == null)
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Boundary curve is missing.");
             return;
         }
 
         var holesRaw = new List<Curve>();
-        DA.GetDataList("Holes", holesRaw);
+        DA.GetDataList(1, holesRaw);
         List<Curve> holes = holesRaw.Where(c => c != null && c.IsValid).ToList();
 
         double maxArea = 0.0;
-        DA.GetData("MaxArea", ref maxArea);
+        DA.GetData(2, ref maxArea);
 
         double maxEdge = 1.0;
-        DA.GetData("MaxEdge", ref maxEdge);
+        DA.GetData(3, ref maxEdge);
 
         var plane = Plane.WorldXY;
-        DA.GetData("Plane", ref plane);
+        DA.GetData(4, ref plane);
 
         if (!boundary.IsClosed)
         {
@@ -102,5 +102,5 @@ public class GH_ConstrainedDelaunayPlanarGPU : GH_Component
 
     protected override Bitmap Icon => null!;
 
-    public override Guid ComponentGuid => new("c4d8e2f1-6a3b-4c9d-8e7f-0a1b2c3d4e5f");
+    public override Guid ComponentGuid => new("d4e8f2a1-7b4c-5d0e-9f8a-2b3c4d5e6f70");
 }
