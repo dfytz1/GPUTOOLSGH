@@ -2,6 +2,7 @@ using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using GHGPUPlugin.NativeInterop;
+using GHGPUPlugin.Utilities;
 using System.Drawing;
 
 namespace GHGPUPlugin.Components.DataRelationships;
@@ -54,7 +55,7 @@ public class GH_ClosestPointGPU : GH_Component
         bool useGpu = true;
         DA.GetData("UseGPU", ref useGpu);
 
-        if (!TryGetTriangleMeshForClosest(meshIn, out Mesh work))
+        if (!MeshTriangleUtils.TryGetTriangleMeshForClosest(meshIn, out Mesh work))
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Mesh has non-triangle faces that could not be triangulated.");
             return;
@@ -180,31 +181,6 @@ public class GH_ClosestPointGPU : GH_Component
         DA.SetDataList(0, pts);
         DA.SetDataList(1, dists);
         DA.SetDataList(2, tris);
-    }
-
-    /// <summary>Use input mesh directly when already all triangles; otherwise duplicate once and quad-split.</summary>
-    internal static bool TryGetTriangleMeshForClosest(Mesh input, out Mesh triangleMesh)
-    {
-        triangleMesh = input;
-        int fc = input.Faces.Count;
-        for (int i = 0; i < fc; i++)
-        {
-            if (!input.Faces[i].IsTriangle)
-            {
-                Mesh dup = input.DuplicateMesh();
-                dup.Faces.ConvertQuadsToTriangles();
-                triangleMesh = dup;
-                for (int j = 0; j < dup.Faces.Count; j++)
-                {
-                    if (!dup.Faces[j].IsTriangle)
-                        return false;
-                }
-
-                return true;
-            }
-        }
-
-        return true;
     }
 
     protected override Bitmap Icon => null!;

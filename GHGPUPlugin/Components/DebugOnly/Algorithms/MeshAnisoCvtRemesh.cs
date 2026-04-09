@@ -1,6 +1,6 @@
 using System.Diagnostics;
-using GHGPUPlugin.Components.DataRelationships;
 using GHGPUPlugin.MeshTopology;
+using GHGPUPlugin.Utilities;
 using GHGPUPlugin.NativeInterop;
 using Grasshopper.Kernel;
 using Rhino.Collections;
@@ -33,7 +33,7 @@ public static class MeshAnisoCvtRemesh
 
         NativeLoader.EnsureLoaded();
 
-        if (!GH_ClosestPointGPU.TryGetTriangleMeshForClosest(inputMesh, out Mesh? work) || work == null)
+        if (!MeshTriangleUtils.TryGetTriangleMeshForClosest(inputMesh, out Mesh? work) || work == null)
         {
             error = "Mesh needs triangle faces (quads are triangulated once).";
             return false;

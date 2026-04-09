@@ -1,3 +1,5 @@
+// Mesh–mesh triangle intersection: one thread per triangle pair. Per-thread broad-phase is an
+// AABB overlap of the two triangles before the SAT test (no mesh-level BVH).
 #include <metal_stdlib>
 using namespace metal;
 

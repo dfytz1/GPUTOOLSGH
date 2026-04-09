@@ -1,8 +1,10 @@
+using System.Collections.Generic;
 using System.Drawing;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using GHGPUPlugin.NativeInterop;
+using GHGPUPlugin.Utilities;
 
 namespace GHGPUPlugin.Components.DataRelationships;
 
@@ -10,12 +12,22 @@ namespace GHGPUPlugin.Components.DataRelationships;
 public class GH_GreedyPointPairsGPU : GH_Component
 {
     private const long MaxGpuPairs = 10_000_000;
+    private const int TwoOptMaxMatchedPairs = 5000;
 
     private struct Edge
     {
         internal double Dist;
         internal int A;
         internal int B;
+    }
+
+    private sealed class DistSqIndexComparer : IComparer<int>
+    {
+        private readonly float[] _distSq;
+
+        internal DistSqIndexComparer(float[] distSq) => _distSq = distSq;
+
+        public int Compare(int x, int y) => _distSq[x].CompareTo(_distSq[y]);
     }
 
     public GH_GreedyPointPairsGPU()
@@ -33,7 +45,7 @@ public class GH_GreedyPointPairsGPU : GH_Component
     {
         pManager.AddPointParameter("Points", "P", "Point cloud to pair.", GH_ParamAccess.list);
         pManager.AddNumberParameter("MaxDistance", "D", "Maximum edge length; non-positive = unlimited.", GH_ParamAccess.item, 0);
-        pManager.AddIntegerParameter("MaxIterations", "N", "2-opt outer iterations (non-positive defaults to 100).", GH_ParamAccess.item, 100);
+        pManager.AddIntegerParameter("MaxIterations", "MaxIter", "2-opt outer iterations (non-positive defaults to 100).", GH_ParamAccess.item, 100);
         pManager.AddBooleanParameter("UseGPU", "GPU", "Use Metal for pairwise distances when eligible.", GH_ParamAccess.item, true);
     }
 
@@ -72,13 +84,17 @@ public class GH_GreedyPointPairsGPU : GH_Component
         long pairCountLong = (long)n * (n - 1) / 2;
         double maxD2 = maxDist > 0 ? maxDist * maxDist : double.MaxValue;
 
-        List<int> sortedPairIndices;
+        var pairA = new List<int>();
+        var pairB = new List<int>();
+
         if (useGpu
             && NativeLoader.IsMetalAvailable
             && pairCountLong > 0
             && pairCountLong <= MaxGpuPairs
             && MetalSharedContext.TryGetContext(out IntPtr ctx))
         {
+            int pc = checked((int)pairCountLong);
+
             var x = new float[n];
             var y = new float[n];
             var z = new float[n];
@@ -89,7 +105,7 @@ public class GH_GreedyPointPairsGPU : GH_Component
                 z[i] = (float)points[i].Z;
             }
 
-            var distSq = new float[pairCountLong];
+            var distSq = new float[pc];
             int code = MetalBridge.PairwiseUpperDistSq(ctx, x, y, z, n, distSq);
             if (code != 0)
             {
@@ -99,15 +115,17 @@ public class GH_GreedyPointPairsGPU : GH_Component
                 return;
             }
 
-            sortedPairIndices = new List<int>((int)pairCountLong);
-            for (int k = 0; k < (int)pairCountLong; k++)
+            var pairIndices = new List<int>(pc);
+            for (int k = 0; k < pc; k++)
             {
                 if (maxDist <= 0 || distSq[k] <= maxD2)
-                    sortedPairIndices.Add(k);
+                    pairIndices.Add(k);
             }
 
-            sortedPairIndices.Sort((a, b) => distSq[a].CompareTo(distSq[b]));
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "Candidate pairs (GPU): " + sortedPairIndices.Count);
+            pairIndices.Sort(new DistSqIndexComparer(distSq));
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "Candidate pairs (GPU): " + pairIndices.Count);
+
+            GreedyMatchFromPairIndices(n, pairCountLong, pairIndices, pairA, pairB);
         }
         else
         {
@@ -128,32 +146,33 @@ public class GH_GreedyPointPairsGPU : GH_Component
                     "Metal context unavailable; using RTree radius search.");
             }
 
-            sortedPairIndices = BuildCandidatesRTree(points, n, maxDist);
+            List<Edge> edges = BuildSortedEdgesRTree(points, n, maxDist);
+            if (edges.Count == 0)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "No pairs found.");
+                return;
+            }
+
+            GreedyMatchFromSortedEdges(edges, n, pairA, pairB);
         }
 
-        if (sortedPairIndices.Count == 0)
+        if (pairA.Count == 0)
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "No pairs found.");
             return;
         }
 
-        var pairA = new List<int>();
-        var pairB = new List<int>();
-        bool[] used = new bool[n];
-        foreach (int k in sortedPairIndices)
+        int optIters;
+        if (pairA.Count <= TwoOptMaxMatchedPairs)
+            optIters = RunTwoOpt(points, maxDist, maxIterations, pairA, pairB);
+        else
         {
-            if (k < 0 || k >= pairCountLong)
-                continue;
-            DecodePairIndex(k, n, out int a, out int b);
-            if (used[a] || used[b])
-                continue;
-            used[a] = true;
-            used[b] = true;
-            pairA.Add(a);
-            pairB.Add(b);
+            optIters = 0;
+            AddRuntimeMessage(
+                GH_RuntimeMessageLevel.Warning,
+                $"2-opt skipped: {pairA.Count} matched pairs exceeds limit {TwoOptMaxMatchedPairs} (O(n²) cost).");
         }
 
-        int optIters = RunTwoOpt(points, maxDist, maxIterations, pairA, pairB);
         AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "2-opt iterations: " + optIters);
 
         var outLines = new List<Line>();
@@ -191,7 +210,40 @@ public class GH_GreedyPointPairsGPU : GH_Component
         DA.SetDataList(4, unmatchedPts);
     }
 
-    private List<int> BuildCandidatesRTree(List<Point3d> points, int n, double maxDist)
+    private static void GreedyMatchFromPairIndices(int n, long pairCountLong, List<int> sortedK, List<int> pairA, List<int> pairB)
+    {
+        bool[] used = new bool[n];
+        foreach (int k in sortedK)
+        {
+            if (k < 0 || k >= pairCountLong)
+                continue;
+            DecodePairIndex(k, n, out int a, out int b);
+            if (used[a] || used[b])
+                continue;
+            used[a] = true;
+            used[b] = true;
+            pairA.Add(a);
+            pairB.Add(b);
+        }
+    }
+
+    private static void GreedyMatchFromSortedEdges(List<Edge> sortedEdges, int n, List<int> pairA, List<int> pairB)
+    {
+        bool[] used = new bool[n];
+        foreach (var e in sortedEdges)
+        {
+            if (e.A < 0 || e.A >= n || e.B < 0 || e.B >= n)
+                continue;
+            if (used[e.A] || used[e.B])
+                continue;
+            used[e.A] = true;
+            used[e.B] = true;
+            pairA.Add(e.A);
+            pairB.Add(e.B);
+        }
+    }
+
+    private static List<Edge> BuildSortedEdgesRTree(List<Point3d> points, int n, double maxDist)
     {
         var candidates = new List<Edge>(n * 4);
         var tree = new RTree();
@@ -215,20 +267,10 @@ public class GH_GreedyPointPairsGPU : GH_Component
         }
 
         if (candidates.Count == 0)
-            return new List<int>();
+            return candidates;
 
         candidates.Sort((x, y) => x.Dist.CompareTo(y.Dist));
-
-        var fake = new List<int>(candidates.Count);
-        long pc = (long)n * (n - 1) / 2;
-        foreach (var e in candidates)
-        {
-            int k = EncodePairIndex(e.A, e.B, n);
-            if (k >= 0 && k < pc)
-                fake.Add(k);
-        }
-
-        return fake;
+        return candidates;
     }
 
     private static int RunTwoOpt(
@@ -319,16 +361,7 @@ public class GH_GreedyPointPairsGPU : GH_Component
         j = i + 1 + (k - baseI);
     }
 
-    private static int EncodePairIndex(int i, int j, int n)
-    {
-        if (i > j)
-            (i, j) = (j, i);
-        if (i == j)
-            return -1;
-        return i * (2 * n - i - 1) / 2 + (j - i - 1);
-    }
-
-    protected override Bitmap Icon => null!;
+    protected override Bitmap Icon => ComponentIcons24.GreedyPointPairs;
 
     public override Guid ComponentGuid => new("c4d8e1f2-9a3b-4c5d-8e6f-0a1b2c3d4e5f");
 }

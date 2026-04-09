@@ -5,19 +5,46 @@ using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using GHGPUPlugin.NativeInterop;
+using GHGPUPlugin.Utilities;
 
 namespace GHGPUPlugin.Components.DataRelationships;
 
-/// <summary>Brute-force triangle–triangle intersection between two meshes (or self) on Metal, with CPU fallback.</summary>
+/// <summary>
+/// Triangle–triangle intersection between two meshes (or self) on Metal, with CPU fallback.
+/// The Metal kernel applies a per-pair AABB test before SAT (no mesh-level BVH yet).
+/// </summary>
 public class GH_MeshCollisionGPU : GH_Component
 {
     private const long MaxPairTests = 50_000_000L;
+
+    private readonly struct TriD
+    {
+        internal readonly double X0, Y0, Z0, X1, Y1, Z1, X2, Y2, Z2;
+
+        internal TriD(float[] px, float[] py, float[] pz, int[] tri, int ti)
+        {
+            int o = ti * 3;
+            int i0 = tri[o];
+            int i1 = tri[o + 1];
+            int i2 = tri[o + 2];
+            X0 = px[i0];
+            Y0 = py[i0];
+            Z0 = pz[i0];
+            X1 = px[i1];
+            Y1 = py[i1];
+            Z1 = pz[i1];
+            X2 = px[i2];
+            Y2 = py[i2];
+            Z2 = pz[i2];
+        }
+    }
 
     public GH_MeshCollisionGPU()
         : base(
             "Mesh Collision GPU",
             "MeshHitGPU",
             "Test triangle–triangle intersection between two triangle meshes (or one mesh against itself). "
+                + "GPU tests use an axis-aligned bounding box per triangle pair before SAT. "
                 + "Reports whether any pair intersects and records up to MaxHits intersecting face index pairs.",
             "GPUTools",
             "Mesh")
@@ -37,8 +64,8 @@ public class GH_MeshCollisionGPU : GH_Component
     {
         pManager.AddBooleanParameter("Colliding", "C", "True if at least one triangle pair intersects.", GH_ParamAccess.item);
         pManager.AddIntegerParameter("HitCount", "N", "Total intersecting pairs found (can exceed MaxHits).", GH_ParamAccess.item);
-        pManager.AddIntegerParameter("TriangleA", "iA", "Triangle index on mesh A for each recorded hit.", GH_ParamAccess.list);
-        pManager.AddIntegerParameter("TriangleB", "iB", "Triangle index on mesh B (or A in self mode) for each recorded hit.", GH_ParamAccess.list);
+        pManager.AddIntegerParameter("TriangleIndexA", "iA", "Triangle index on mesh A for each recorded hit.", GH_ParamAccess.list);
+        pManager.AddIntegerParameter("TriangleIndexB", "iB", "Triangle index on mesh B (or A in self mode) for each recorded hit.", GH_ParamAccess.list);
     }
 
     protected override void SolveInstance(IGH_DataAccess DA)
@@ -66,7 +93,7 @@ public class GH_MeshCollisionGPU : GH_Component
         bool useGpu = true;
         DA.GetData(4, ref useGpu);
 
-        if (!GH_ClosestPointGPU.TryGetTriangleMeshForClosest(meshA, out Mesh workA))
+        if (!MeshTriangleUtils.TryGetTriangleMeshForClosest(meshA, out Mesh workA))
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "MeshA could not be reduced to triangles.");
             return;
@@ -81,7 +108,7 @@ public class GH_MeshCollisionGPU : GH_Component
         }
         else
         {
-            if (!GH_ClosestPointGPU.TryGetTriangleMeshForClosest(meshB!, out workB!))
+            if (!MeshTriangleUtils.TryGetTriangleMeshForClosest(meshB!, out workB!))
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "MeshB could not be reduced to triangles.");
                 return;
@@ -161,6 +188,7 @@ public class GH_MeshCollisionGPU : GH_Component
                     "GPU mesh collision did not run — using CPU (same tests).");
             }
 
+            var hitWriteLock = new object();
             RunCpuTriangleHits(
                 ax,
                 ay,
@@ -177,7 +205,8 @@ public class GH_MeshCollisionGPU : GH_Component
                 maxHits,
                 outIa,
                 outIb,
-                totalBuf);
+                totalBuf,
+                hitWriteLock);
         }
 
         int total = totalBuf[0];
@@ -256,7 +285,8 @@ public class GH_MeshCollisionGPU : GH_Component
         int maxHits,
         int[] outIa,
         int[] outIb,
-        int[] totalBuf)
+        int[] totalBuf,
+        object hitWriteLock)
     {
         int np = self ? checked(nTa * (nTa - 1) / 2) : checked(nTa * nTb);
         int totalHits = 0;
@@ -275,112 +305,134 @@ public class GH_MeshCollisionGPU : GH_Component
                     return;
             }
 
-            GetTri(ax, ay, az, triA, ia, out Point3d a0, out Point3d a1, out Point3d a2);
-            GetTri(bx, by, bz, triB, ib, out Point3d b0, out Point3d b1, out Point3d b2);
+            var ta = new TriD(ax, ay, az, triA, ia);
+            var tb = new TriD(bx, by, bz, triB, ib);
 
-            if (!AabbOverlap(a0, a1, a2, b0, b1, b2))
+            if (!AabbOverlap(ta, tb))
                 return;
 
-            if (!TrianglesIntersectSat(a0, a1, a2, b0, b1, b2))
+            if (!TrianglesIntersectSat(ta, tb))
                 return;
 
             int t = Interlocked.Increment(ref totalHits);
             if (t <= maxHits)
             {
-                outIa[t - 1] = ia;
-                outIb[t - 1] = ib;
+                lock (hitWriteLock)
+                {
+                    outIa[t - 1] = ia;
+                    outIb[t - 1] = ib;
+                }
             }
         });
 
         totalBuf[0] = totalHits;
     }
 
-    private static void GetTri(
-        float[] px,
-        float[] py,
-        float[] pz,
-        int[] tri,
-        int ti,
-        out Point3d a,
-        out Point3d b,
-        out Point3d c)
+    private static bool AabbOverlap(TriD a, TriD b)
     {
-        int o = ti * 3;
-        int i0 = tri[o];
-        int i1 = tri[o + 1];
-        int i2 = tri[o + 2];
-        a = new Point3d(px[i0], py[i0], pz[i0]);
-        b = new Point3d(px[i1], py[i1], pz[i1]);
-        c = new Point3d(px[i2], py[i2], pz[i2]);
-    }
+        double minAx = Math.Min(Math.Min(a.X0, a.X1), a.X2);
+        double maxAx = Math.Max(Math.Max(a.X0, a.X1), a.X2);
+        double minAy = Math.Min(Math.Min(a.Y0, a.Y1), a.Y2);
+        double maxAy = Math.Max(Math.Max(a.Y0, a.Y1), a.Y2);
+        double minAz = Math.Min(Math.Min(a.Z0, a.Z1), a.Z2);
+        double maxAz = Math.Max(Math.Max(a.Z0, a.Z1), a.Z2);
 
-    private static bool AabbOverlap(Point3d a0, Point3d a1, Point3d a2, Point3d b0, Point3d b1, Point3d b2)
-    {
-        double minAx = Math.Min(Math.Min(a0.X, a1.X), a2.X);
-        double maxAx = Math.Max(Math.Max(a0.X, a1.X), a2.X);
-        double minAy = Math.Min(Math.Min(a0.Y, a1.Y), a2.Y);
-        double maxAy = Math.Max(Math.Max(a0.Y, a1.Y), a2.Y);
-        double minAz = Math.Min(Math.Min(a0.Z, a1.Z), a2.Z);
-        double maxAz = Math.Max(Math.Max(a0.Z, a1.Z), a2.Z);
-
-        double minBx = Math.Min(Math.Min(b0.X, b1.X), b2.X);
-        double maxBx = Math.Max(Math.Max(b0.X, b1.X), b2.X);
-        double minBy = Math.Min(Math.Min(b0.Y, b1.Y), b2.Y);
-        double maxBy = Math.Max(Math.Max(b0.Y, b1.Y), b2.Y);
-        double minBz = Math.Min(Math.Min(b0.Z, b1.Z), b2.Z);
-        double maxBz = Math.Max(Math.Max(b0.Z, b1.Z), b2.Z);
+        double minBx = Math.Min(Math.Min(b.X0, b.X1), b.X2);
+        double maxBx = Math.Max(Math.Max(b.X0, b.X1), b.X2);
+        double minBy = Math.Min(Math.Min(b.Y0, b.Y1), b.Y2);
+        double maxBy = Math.Max(Math.Max(b.Y0, b.Y1), b.Y2);
+        double minBz = Math.Min(Math.Min(b.Z0, b.Z1), b.Z2);
+        double maxBz = Math.Max(Math.Max(b.Z0, b.Z1), b.Z2);
 
         return maxAx >= minBx && maxBx >= minAx && maxAy >= minBy && maxBy >= minAy && maxAz >= minBz && maxBz >= minAz;
     }
 
-    private static double Dot(Vector3d axis, Point3d p) => axis.X * p.X + axis.Y * p.Y + axis.Z * p.Z;
+    private static void Cross(double ax, double ay, double az, double bx, double by, double bz, out double ox, out double oy, out double oz)
+    {
+        ox = ay * bz - az * by;
+        oy = az * bx - ax * bz;
+        oz = ax * by - ay * bx;
+    }
+
+    private static double DotP(double ax, double ay, double az, double px, double py, double pz) => ax * px + ay * py + az * pz;
 
     private static bool SeparatedByAxis(
-        Vector3d axis,
-        Point3d a0,
-        Point3d a1,
-        Point3d a2,
-        Point3d b0,
-        Point3d b1,
-        Point3d b2)
+        double ax,
+        double ay,
+        double az,
+        TriD a,
+        TriD b)
     {
-        if (axis.SquareLength < 1e-60)
+        double al2 = ax * ax + ay * ay + az * az;
+        if (al2 < 1e-60)
             return false;
-        double p0 = Dot(axis, a0);
-        double p1 = Dot(axis, a1);
-        double p2 = Dot(axis, a2);
+        double p0 = DotP(ax, ay, az, a.X0, a.Y0, a.Z0);
+        double p1 = DotP(ax, ay, az, a.X1, a.Y1, a.Z1);
+        double p2 = DotP(ax, ay, az, a.X2, a.Y2, a.Z2);
         double minA = Math.Min(Math.Min(p0, p1), p2);
         double maxA = Math.Max(Math.Max(p0, p1), p2);
-        double q0 = Dot(axis, b0);
-        double q1 = Dot(axis, b1);
-        double q2 = Dot(axis, b2);
+        double q0 = DotP(ax, ay, az, b.X0, b.Y0, b.Z0);
+        double q1 = DotP(ax, ay, az, b.X1, b.Y1, b.Z1);
+        double q2 = DotP(ax, ay, az, b.X2, b.Y2, b.Z2);
         double minB = Math.Min(Math.Min(q0, q1), q2);
         double maxB = Math.Max(Math.Max(q0, q1), q2);
         return maxA < minB || maxB < minA;
     }
 
-    private static bool TrianglesIntersectSat(Point3d a0, Point3d a1, Point3d a2, Point3d b0, Point3d b1, Point3d b2)
+    private static bool TrianglesIntersectSat(TriD a, TriD b)
     {
-        Vector3d n1 = Vector3d.CrossProduct(a1 - a0, a2 - a0);
-        Vector3d n2 = Vector3d.CrossProduct(b1 - b0, b2 - b0);
-        if (n1.SquareLength < 1e-60 || n2.SquareLength < 1e-60)
+        double e1ax = a.X1 - a.X0, e1ay = a.Y1 - a.Y0, e1az = a.Z1 - a.Z0;
+        double e1bx = a.X2 - a.X1, e1by = a.Y2 - a.Y1, e1bz = a.Z2 - a.Z1;
+        double e1cx = a.X0 - a.X2, e1cy = a.Y0 - a.Y2, e1cz = a.Z0 - a.Z2;
+
+        double e2ax = b.X1 - b.X0, e2ay = b.Y1 - b.Y0, e2az = b.Z1 - b.Z0;
+        double e2bx = b.X2 - b.X1, e2by = b.Y2 - b.Y1, e2bz = b.Z2 - b.Z1;
+        double e2cx = b.X0 - b.X2, e2cy = b.Y0 - b.Y2, e2cz = b.Z0 - b.Z2;
+
+        Cross(e1ax, e1ay, e1az, e1bx, e1by, e1bz, out double n1x, out double n1y, out double n1z);
+        Cross(e2ax, e2ay, e2az, e2bx, e2by, e2bz, out double n2x, out double n2y, out double n2z);
+
+        if (n1x * n1x + n1y * n1y + n1z * n1z < 1e-60 || n2x * n2x + n2y * n2y + n2z * n2z < 1e-60)
             return false;
 
-        if (SeparatedByAxis(n1, a0, a1, a2, b0, b1, b2))
+        if (SeparatedByAxis(n1x, n1y, n1z, a, b))
             return false;
-        if (SeparatedByAxis(n2, a0, a1, a2, b0, b1, b2))
+        if (SeparatedByAxis(n2x, n2y, n2z, a, b))
             return false;
 
-        Vector3d[] e1 = { a1 - a0, a2 - a1, a0 - a2 };
-        Vector3d[] e2 = { b1 - b0, b2 - b1, b0 - b2 };
+        Span<double> e1xs = stackalloc double[3];
+        Span<double> e1ys = stackalloc double[3];
+        Span<double> e1zs = stackalloc double[3];
+        Span<double> e2xs = stackalloc double[3];
+        Span<double> e2ys = stackalloc double[3];
+        Span<double> e2zs = stackalloc double[3];
+        e1xs[0] = e1ax;
+        e1xs[1] = e1bx;
+        e1xs[2] = e1cx;
+        e1ys[0] = e1ay;
+        e1ys[1] = e1by;
+        e1ys[2] = e1cy;
+        e1zs[0] = e1az;
+        e1zs[1] = e1bz;
+        e1zs[2] = e1cz;
+        e2xs[0] = e2ax;
+        e2xs[1] = e2bx;
+        e2xs[2] = e2cx;
+        e2ys[0] = e2ay;
+        e2ys[1] = e2by;
+        e2ys[2] = e2cy;
+        e2zs[0] = e2az;
+        e2zs[1] = e2bz;
+        e2zs[2] = e2cz;
+
         for (int i = 0; i < 3; i++)
         {
             for (int j = 0; j < 3; j++)
             {
-                Vector3d ax = Vector3d.CrossProduct(e1[i], e2[j]);
-                if (ax.SquareLength < 1e-60)
+                Cross(e1xs[i], e1ys[i], e1zs[i], e2xs[j], e2ys[j], e2zs[j], out double cxx, out double cxy, out double cxz);
+                if (cxx * cxx + cxy * cxy + cxz * cxz < 1e-60)
                     continue;
-                if (SeparatedByAxis(ax, a0, a1, a2, b0, b1, b2))
+                if (SeparatedByAxis(cxx, cxy, cxz, a, b))
                     return false;
             }
         }
@@ -407,7 +459,7 @@ public class GH_MeshCollisionGPU : GH_Component
         j = i + 1 + (k - baseI);
     }
 
-    protected override Bitmap Icon => null!;
+    protected override Bitmap Icon => ComponentIcons24.MeshCollision;
 
     public override Guid ComponentGuid => new("7a2e9c41-b0d3-4f8e-9c12-6d5e8f1a2b3c");
 }
