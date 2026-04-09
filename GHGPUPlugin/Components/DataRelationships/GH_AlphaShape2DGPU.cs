@@ -8,14 +8,14 @@ using Rhino.Geometry;
 
 namespace GHGPUPlugin.Components.DataRelationships;
 
-/// <summary>2D alpha shape: Delaunay in a plane, then drop triangles whose circumradius exceeds a threshold (Metal parallel filter, CPU fallback).</summary>
+/// <summary>2D alpha shape: Delaunay via <see cref="AnisoCvtDelaunay2D"/>, then drop triangles whose circumradius exceeds a threshold (Metal parallel filter, CPU fallback).</summary>
 public class GH_AlphaShape2DGPU : GH_Component
 {
     public GH_AlphaShape2DGPU()
         : base(
             "Alpha Shape 2D GPU",
             "AlphaShGPU",
-            "Builds a planar Delaunay triangulation of projected points, then keeps triangles whose circumcircle radius is at most Alpha radius. Smaller Alpha radius removes more triangles; non-positive Alpha keeps the full Delaunay mesh. Triangle filtering runs on Metal when available.",
+            "Builds a planar Delaunay triangulation (same Bowyer–Watson as Anisotropic CVT remesh) of projected points, then keeps triangles whose circumcircle radius is at most Alpha radius. Smaller Alpha radius removes more triangles; non-positive Alpha keeps the full Delaunay mesh. Triangle filtering runs on Metal when available.",
             "GPUTools",
             "Graph")
     {
@@ -66,7 +66,7 @@ public class GH_AlphaShape2DGPU : GH_Component
             py[i] = (float)v;
         }
 
-        List<int> tri = PlanarDelaunay2D.BowyerWatson(uv);
+        List<int> tri = AnisoCvtDelaunay2D.BowyerWatson(uv);
         int nTri = tri.Count / 3;
         if (nTri < 1)
         {
@@ -116,7 +116,10 @@ public class GH_AlphaShape2DGPU : GH_Component
                     int i0 = tri[t * 3];
                     int i1 = tri[t * 3 + 1];
                     int i2 = tri[t * 3 + 2];
-                    double R = PlanarDelaunay2D.CircumradiusUv(uv[i0], uv[i1], uv[i2]);
+                    double R = AnisoCvtDelaunay2D.Circumradius(
+                        new Point3d(uv[i0].X, uv[i0].Y, 0),
+                        new Point3d(uv[i1].X, uv[i1].Y, 0),
+                        new Point3d(uv[i2].X, uv[i2].Y, 0));
                     keep[t] = (byte)(R <= alphaR ? 1 : 0);
                 });
             }
